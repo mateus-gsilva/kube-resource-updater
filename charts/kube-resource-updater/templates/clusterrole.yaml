@@ -1,0 +1,72 @@
+{{- /*
+CronJob-only RBAC. The webhook has its own narrower role under
+templates/webhook/rbac.yaml.
+
+Rules are split between two groups:
+
+  * Always granted — what the sync loop unconditionally needs.
+  * Conditional — granted only when prometheusUrl is empty (the tool then
+    invokes discover_prometheus_url). When prometheusUrl is set explicitly,
+    the discovery code path never runs and the broader cluster reads it
+    would do are dead code; we drop them so an audit
+    (`kubectl auth can-i ...`) reflects exactly what the running pod
+    exercises.
+
+The `secrets` rule was removed in 1.2.0 — git credentials come exclusively
+from `GITLAB_TOKEN` (chart populates via `gitlab.token` / `gitlab.existingSecret`).
+*/}}
+{{- if and .Values.rbac.create .Values.cronjob.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kube-resource-updater.fullname" . }}
+  labels:
+    {{- include "kube-resource-updater.labels" . | nindent 4 }}
+rules:
+  # Namespace opt-in discovery — the tool lists every Namespace and filters
+  # by the `kube-resource-updater.enabled: "true"` annotation. Cluster scope
+  # because the tool patches workloads in any opted-in namespace.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+  # Workload discovery (Deployments, StatefulSets, DaemonSets) across all
+  # opted-in namespaces. Cluster scope mirrors the namespace discovery scope above.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list"]
+  # CronJob discovery (chart 1.22.16). The sync loop calls
+  # list_namespaced_cron_job to rightsize CronJob pod templates via the CR.
+  # No `watch` — CronJob is a batch process that lists at sync time, same
+  # pattern as `apps` above. Standalone `jobs` is intentionally excluded:
+  # Jobs are ephemeral and CronJob-owned ones are covered transitively by
+  # the CronJob CR's matchLabels.
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list"]
+  {{- if .Values.config.oomDetectionEnabled }}
+  # OOM-aware (chart 1.11.0). Slow-path lists pods at sync time to scan
+  # `containerStatuses[*].lastState.terminated.reason == "OOMKilled"`
+  # events on opted-in workloads. Pods listed namespace-scoped (only
+  # opted-in namespaces are checked); `list` cluster-wide is the
+  # simplest grant. Read-only — sync never modifies pods.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # Reads existing ResourceOverrides at sync time to pick up the
+  # `oom-floor.<container>` annotation each carries (slow-path
+  # respects the floor as a memory minimum on subsequent
+  # recommendations). Read-only; CR writes go through git, never
+  # the apiserver. Verb dropped automatically when OOM-aware is off.
+  - apiGroups: ["kube-resource-updater.io"]
+    resources: ["resourceoverrides"]
+    verbs: ["get", "list"]
+  {{- end }}
+  {{- /*
+  Discovery-mode reads (endpoints in `default`, services + Prometheus CR
+  in `monitoring`) moved to namespace-scoped Roles in `templates/discovery-rbac.yaml`
+  in chart 1.20.0. Pre-1.20.0 they were granted cluster-wide here; the
+  tightened layout drops three cluster-wide read grants for operators who
+  use discovery (the dominant install sets `prometheusUrl` explicitly and
+  rendered no extra rules either way).
+  */}}
+{{- end }}

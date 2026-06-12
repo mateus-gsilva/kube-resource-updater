@@ -1,0 +1,26 @@
+{{- if .Values.webhook.enabled -}}
+{{- /*
+ClusterIP Service in front of the webhook Deployment.
+The MutatingWebhookConfiguration's clientConfig.service field points here.
+The metrics port is exposed too so a ServiceMonitor can scrape it directly.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels: {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: https-webhook
+      port: 443
+      targetPort: webhook
+      protocol: TCP
+    - name: http-metrics
+      port: {{ .Values.webhook.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "kube-resource-updater.webhook.selectorLabels" . | nindent 4 }}
+{{- end }}

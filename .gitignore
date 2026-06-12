@@ -1,0 +1,52 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Test / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Environment / secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+secrets/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+*.tar.gz
+*.tgz
+# …except the chart's vendored subchart (self-contained offline renders/CI)
+!charts/kube-resource-updater/charts/*.tgz
+*.whl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local Claude assistant context — kept out of git so contributors don't
+# inherit operator examples specific to one deployment and personal
+# preferences. Re-add the file (and remove this rule) when the project
+# is ready to ship a public, generic version of these instructions.
+CLAUDE.md

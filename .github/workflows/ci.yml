@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - uses: azure/setup-helm@v4
+
+      - name: Lint (ruff — correctness rules, config in pyproject.toml)
+        run: ruff check src/ tools/ main.py tests/
+
+      # The canonical suite (~1,200 fail-first asserts incl. helm render
+      # checks against charts/kube-resource-updater). pytest is a thin
+      # alias around the same script — running both would be redundant.
+      - name: QA suite
+        run: python3 tools/qa_params.py
+
+      - name: helm lint
+        run: >
+          helm lint charts/kube-resource-updater
+          --set config.crWriteback.repoUrl=https://example.com/gitops.git
+          --set config.crWriteback.path=overrides
+          --set config.prometheusUrl=http://prom:9090
+          --set git.token=ci-placeholder

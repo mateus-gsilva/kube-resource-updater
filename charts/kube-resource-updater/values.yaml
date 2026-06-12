@@ -1,0 +1,694 @@
+## @section Global parameters
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+## @param kubeVersion Override Kubernetes version
+kubeVersion: ""
+## @param nameOverride Override the chart name
+nameOverride: ""
+## @param fullnameOverride Override the full release name
+fullnameOverride: ""
+## @param commonLabels Labels added to all resources
+commonLabels: {}
+## @param commonAnnotations Annotations added to all resources
+commonAnnotations: {}
+## @param clusterDomain Kubernetes cluster domain
+clusterDomain: cluster.local
+## @param extraDeploy Extra manifests to deploy
+extraDeploy: []
+
+## @section Diagnostic mode
+diagnosticMode:
+  ## @param diagnosticMode.enabled Run the container in sleep mode for debugging
+  enabled: false
+  ## @param diagnosticMode.command Command override in diagnostic mode
+  command:
+    - sleep
+  ## @param diagnosticMode.args Args override in diagnostic mode
+  args:
+    - infinity
+
+## @section Image
+##
+## Project-owned registry (GHCR). An empty `tag` pins the image to the
+## chart's appVersion — the recommended default. Set `digest` for an
+## immutable pin, or point `registry`/`repository` at your own mirror.
+image:
+  registry: ghcr.io
+  repository: mateus-gsilva/kube-resource-updater
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+## @section CronJob parameters
+cronjob:
+  ## @param cronjob.enabled Deploy the sync CronJob and its RBAC. Set to false on clusters that
+  ## only need the admission webhook (the webhook is the per-cluster runtime; the CronJob runs
+  ## in a single "control" cluster that has access to ArgoCD Applications and the GitLab token).
+  enabled: true
+  ## @param cronjob.schedule Cron schedule expression
+  schedule: "0 */6 * * *"
+  ## @param cronjob.timeZone Timezone (requires k8s >= 1.27)
+  timeZone: "UTC"
+  ## @param cronjob.concurrencyPolicy Forbid prevents overlapping runs
+  concurrencyPolicy: Forbid
+  ## @param cronjob.successfulJobsHistoryLimit Number of successful jobs to retain
+  successfulJobsHistoryLimit: 3
+  ## @param cronjob.failedJobsHistoryLimit Number of failed jobs to retain
+  failedJobsHistoryLimit: 1
+  ## @param cronjob.startingDeadlineSeconds Deadline in seconds for starting the job if it misses scheduled time
+  startingDeadlineSeconds: ""
+  ## @param cronjob.activeDeadlineSeconds Maximum duration in seconds the job may be active
+  activeDeadlineSeconds: 1800
+  ## @param cronjob.ttlSecondsAfterFinished Clean up finished Jobs after this many seconds
+  ttlSecondsAfterFinished: 3600
+  ## @param cronjob.backoffLimit Number of retries before marking the job failed
+  backoffLimit: 2
+  ## @param cronjob.restartPolicy Pod restart policy
+  restartPolicy: OnFailure
+
+## @param command Override default container command
+command: []
+## @param args Override default container args
+##
+## `--mr` was historically passed here to force MR-mode regardless of
+## config. Now that `config.createMr` lives in the mounted ConfigMap and
+## is the source of truth, the CLI flag is redundant and (because it's a
+## hard override at runtime) actively confusing. Default to plain `sync`
+## so `config.createMr: false` actually takes effect for direct-push
+## clusters.
+args:
+  - sync
+
+## @section Application config
+##
+## **Hierarchy of effective config**: chart values < Namespace annotation < workload annotation.
+##
+## Every key under `config:` is the *cluster-wide default*. Operators tweak per
+## namespace by setting `kube-resource-updater.<key>: "<value>"` annotations on
+## the Namespace; per workload, set the same annotation on the Deployment /
+## StatefulSet. See [src/overrides.py](../../../projects/kube-resource-updater/src/overrides.py)
+## for the full list of accepted keys (camelCase mirrors this file). Examples:
+##
+##   metadata.annotations:
+##     kube-resource-updater.enabled: "true"            # required (Namespace only)
+##     kube-resource-updater.cpuPercentile: "0.95"      # default-override
+##     kube-resource-updater.shrinkOnly: "true"
+##
+config:
+  ## @param config.gitProvider Git provider override: "" (auto-detect from repoUrl) | "auto" | "gitlab" | "github"
+  ## When empty, the tool infers the provider from the repoUrl host (github.com / github.* →
+  ## GitHub; everything else → GitLab). Override here to force a specific provider or to wire
+  ## GitHub Enterprise Server alongside a custom gitApiUrl.
+  gitProvider: ""
+
+  ## @param config.dryRun Skip git/MR operations (log only)
+  dryRun: false
+  ## Routing of write-back operations to git. `true` opens a GitLab MR;
+  ## `false` pushes directly to the target branch. As of chart 1.13.0 this
+  ## value is the **cluster-wide default**, overridable per Namespace OR
+  ## per workload via annotation following the standard hierarchy:
+  ##
+  ##   metadata.annotations:
+  ##     kube-resource-updater.createMr: "false"
+  ##
+  ## Workload-level annotation wins over namespace, which wins over this
+  ## helm default. A single sync can produce TWO pushes per repo when
+  ## workloads disagree: one direct push for `createMr=false` entries,
+  ## one MR for `createMr=true` entries. Files with workloads in both
+  ## buckets get the file written twice — pass-1 keeps the MR-bucket
+  ## workloads at their previous content (carry-forward), pass-2 forks
+  ## from the updated branch and lands the MR-bucket changes so the MR
+  ## diff only shows what the operator needs to review.
+  ##
+  ## @param config.createMr Open a GitLab MR (default) — false = direct push to crWriteback.branch
+  createMr: true
+  ## @param config.gitAuthorName Git commit author name
+  gitAuthorName: kube-resource-updater
+  ## @param config.gitAuthorEmail Git commit author email
+  gitAuthorEmail: kube-resource-updater@cluster.local
+  ## @param config.cpuLimitMultiplier CPU limit = target × N (fallback when Prometheus unavailable)
+  cpuLimitMultiplier: "4"
+  ## @param config.memoryLimitMultiplier Memory limit = target × N (fallback when Prometheus unavailable)
+  memoryLimitMultiplier: "3"
+  ## @param config.minCpuLimitM Minimum CPU limit in millicores
+  minCpuLimitM: "0"
+  ## @param config.minMemoryLimitMi Minimum memory limit in MiB (0 = disabled)
+  minMemoryLimitMi: "0"
+  ## @param config.logLevel Log level: DEBUG, INFO, WARNING, ERROR
+  logLevel: "INFO"
+  ## @param config.logFormat Log format: text or json
+  logFormat: "text"
+  ## @param config.logColor ANSI-color output for text logs: auto (color when text format), always, never.
+  ## Default "auto" emits muted 256-color escapes tuned for white-bg log viewers (Argo CD,
+  ## GitLab Job logs, xterm-light). Set "never" to drop the escape sequences entirely (e.g. when
+  ## piping through a non-ANSI-aware aggregator). JSON format already strips ANSI regardless.
+  logColor: "auto"
+  ## @param config.cpuPercentile Percentile for CPU request estimation (prometheus source)
+  cpuPercentile: "0.90"
+  ## @param config.memPercentile Percentile for memory request estimation (prometheus source)
+  memPercentile: "0.90"
+  ## @param config.cpuRequestWindow Lookback window for CPU request percentile
+  cpuRequestWindow: "3d"
+  ## @param config.memRequestWindow Lookback window for memory request percentile
+  memRequestWindow: "8d"
+  ## @param config.cpuLimitWindow Lookback window for CPU limit (max_over_time)
+  cpuLimitWindow: "7d"
+  ## @param config.memLimitWindow Lookback window for memory limit (max_over_time)
+  memLimitWindow: "7d"
+  ## @param config.marginFraction Global fallback margin when per-type margins are not set (0 = no automatic margin)
+  # default 10% headroom to absorb scrape gaps + warmup peaks
+  marginFraction: "0.10"
+  ## @param config.minCpuRequestM Minimum CPU request in millicores (0 = disabled)
+  minCpuRequestM: "0"
+  ## @param config.coldStartCpuFloorM Cold-start CPU floor in millicores applied when Prometheus has no history for the container
+  # floor applied during cold-start when no Prom history exists — 10m avoids the 1m throttle trap
+  coldStartCpuFloorM: 10
+  ## @param config.minMemoryRequestMi Minimum memory request in MiB (0 = disabled)
+  minMemoryRequestMi: "0"
+  ## @param config.maxCpuRequestM Maximum CPU request in millicores (0 = disabled)
+  maxCpuRequestM: "0"
+  ## @param config.maxMemoryRequestMi Maximum memory request in MiB (0 = disabled)
+  maxMemoryRequestMi: "0"
+  ## @param config.maxCpuLimitM Maximum CPU limit in millicores (0 = disabled)
+  maxCpuLimitM: "0"
+  ## @param config.maxMemoryLimitMi Maximum memory limit in MiB (0 = disabled)
+  maxMemoryLimitMi: "0"
+  ## @param config.roundValues Round all computed resource values up to nearest order-of-magnitude step (101→200, 11→20)
+  roundValues: "false"
+  ## @param config.growOnly Global grow-only mode: only increase resource values, never decrease. Per-app annotation overrides.
+  growOnly: false
+  ## @param config.shrinkOnly Global shrink-only mode: only decrease resource values, never increase. Per-app annotation overrides.
+  shrinkOnly: false
+
+  ## OOM-aware (chart 1.11.0). Detects `OOMKilled` events on opted-in
+  ## workloads at sync time (slow-path only — chart 1.10.0's webhook
+  ## fast-path was removed; see ROADMAP). When the most recent OOM
+  ## finishedAt is newer than what's recorded on the CR's
+  ## `kube-resource-updater.io/oom-last-event.<container>` annotation,
+  ## the slow-path bumps the container's memory limit to
+  ## `pod.spec.containers[c].resources.limits.memory × oomBumpFactor`
+  ## and stamps the per-container `oom-floor.<container>` annotation
+  ## so subsequent syncs never recommend below the bumped value.
+  ##
+  ## Latency: bounded by the CronJob schedule. For OOM-prone clusters,
+  ## crank `cronjob.schedule` to "*/5 * * * *" or similar; default 6h
+  ## is fine for stable clusters.
+  ##
+  ## Per-workload override via the standard hierarchy
+  ## (workload > namespace > helm-default):
+  ##
+  ##   metadata.annotations:
+  ##     kube-resource-updater.oomDetectionEnabled: "false"
+  ##
+  ## Disables OOM-aware bumping for that specific workload (slow-path
+  ## still recommends from Prometheus normally).
+  ##
+  ## @param config.oomDetectionEnabled Detect OOMKilled and bump memory at sync time
+  oomDetectionEnabled: true
+  ## @param config.oomBumpFactor Multiplier on the limit at OOM time (1.5 = +50% headroom). Bumped value also stamped as the CR's `oom-floor` annotation.
+  oomBumpFactor: "1.5"
+  ## OOM floor stickiness (chart 1.12.0). When `true` (default), an
+  ## OOM bump is recorded as a sticky `oom-floor.<container>` annotation
+  ## on the CR — every subsequent sync clamps the recommendation up to
+  ## this floor so a Prom-driven recommendation can never drop the limit
+  ## below the bumped value. When `false`, the bump still applies for
+  ## that sync (immediate help), but no sticky floor is recorded — the
+  ## next sync's recommendation is free to drop the limit again. Use
+  ## case: workload where Prometheus is the long-term source of truth
+  ## and an operator-curated floor would block normal sizing-down after
+  ## an optimization. Per-workload override via standard hierarchy:
+  ##
+  ##   metadata.annotations:
+  ##     kube-resource-updater.oomFloorEnabled: "false"
+  ##
+  ## To clear an existing floor ONCE without permanently disabling
+  ## the feature, set `oomFloorReset: "true"` on the namespace or
+  ## workload. The slow-path will zero `oom-floor`, `oom-last-event`
+  ## and `oom-boost-history` for every container of every CR in scope
+  ## on the next sync. The annotation is intentionally NOT removed by
+  ## the tool — operator deletes it manually after confirming the
+  ## reset took effect (otherwise every sync would re-reset).
+  ##
+  ## @param config.oomFloorEnabled Make OOM bumps sticky via `oom-floor.<container>` annotation
+  oomFloorEnabled: true
+
+  ## Comma-separated list of container names to leave alone — the sync
+  ## loop will not include them on a ResourceOverride and the webhook
+  ## therefore never patches them. Use it for service-mesh / observability
+  ## sidecars where the chart vendor sets resources for you (`istio-proxy`,
+  ## `linkerd-proxy`, `datadog-agent`, `fluent-bit`, `otel-collector`, ...).
+  ##
+  ## Init containers are ALWAYS skipped without entry here — the Prometheus
+  ## recommender can't produce stable values for short-lived containers.
+  ##
+  ## Hierarchy (workload > namespace > this default):
+  ##
+  ##   metadata.annotations:
+  ##     kube-resource-updater.skipContainers: "istio-proxy,fluent-bit"
+  ##
+  ## Empty by default — vendor names drift and we'd rather operators
+  ## write the names they actually run. Anything cluster-wide (e.g. you
+  ## inject istio everywhere) goes here.
+  ##
+  ## @param config.skipContainers Comma-separated container names to skip cluster-wide
+  skipContainers: ""
+
+  ## CR write-back target — REQUIRED. The chart fails to install/upgrade when
+  ## crWriteback.repoUrl or crWriteback.path is empty (Helm `required` template
+  ## function in templates/configmap.yaml). The tool re-validates at startup
+  ## as defence in depth in case the ConfigMap is hand-edited later.
+  ##
+  ## Output layout: `<repoUrl>@<branch>:<path>/<namespace>.resource-override.yaml`
+  ## — one file per Namespace, with multiple workloads of the same Namespace
+  ## stored as separate YAML documents in that file.
+  crWriteback:
+    ## @param config.crWriteback.repoUrl Git repo URL where ResourceOverride CRs are committed (REQUIRED)
+    repoUrl: ""
+    ## @param config.crWriteback.branch Branch within crWriteback.repoUrl (defaults to "main")
+    branch: "main"
+    ## @param config.crWriteback.path In-repo directory where files land (REQUIRED)
+    path: ""
+  ## Prometheus URL — REQUIRED since chart 1.20.0 (auto-discovery removed).
+  ##
+  ## Set explicitly to a reachable Prometheus endpoint. `helm install/upgrade`
+  ## fails when this is empty AND `cronjob.enabled: true`. The kube-prometheus-
+  ## stack convention is:
+  ##
+  ##     prometheusUrl: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+  ##
+  ## Adjust the Service name / namespace if Prometheus runs elsewhere.
+  ##
+  ## Pre-1.20.0 the chart auto-discovered via k8s Service-DNS in `monitoring` +
+  ## Prometheus CR `externalUrl` fallback. That code path was removed along
+  ## with three cluster-wide RBAC grants (endpoints / services /
+  ## monitoring.coreos.com/prometheuses) — operators outside the convention
+  ## had to set this explicitly anyway, so the discovery surface was wasted
+  ## permission for everyone.
+  ##
+  ## @param config.prometheusUrl Prometheus URL (REQUIRED when cronjob.enabled)
+  prometheusUrl: ""
+  ## @param config.gitlabUsername DEPRECATED — use git.username instead. Kept as a config-file
+  ## alias so existing ConfigMaps that carry `gitlabUsername:` continue to work without operator
+  ## action. The Python side reads git.username first, falls back to gitlabUsername.
+  gitlabUsername: ""
+
+  ## Merge Request metadata applied to every MR the tool opens. All fields
+  ## default to "do nothing" — bare install matches the pre-1.7.0 MR shape.
+  ##
+  ## `assignees` and `reviewers` accept a comma-separated list of GitLab
+  ## **usernames**; the tool resolves them to numeric IDs once per sync via
+  ## `GET /api/v4/users?username=…`. Unknown usernames log a warning and
+  ## are dropped, so a typo never blocks the MR from opening.
+  ##
+  ## `labels` is a plain comma-separated list passed to the GitLab MR API
+  ## as-is. `squash` and `removeSourceBranch` map directly to the GitLab
+  ## MR creation fields of the same name.
+  mr:
+    ## @param config.mr.assignees Comma-separated GitLab usernames to assign on MR open
+    assignees: ""
+    ## @param config.mr.reviewers Comma-separated GitLab usernames to add as reviewers
+    reviewers: ""
+    ## @param config.mr.labels Comma-separated MR labels
+    labels: ""
+    ## @param config.mr.squash Set MR's `Squash commits when merging` flag
+    squash: false
+    ## @param config.mr.removeSourceBranch Delete source branch after merge (kept true for the historical default)
+    removeSourceBranch: true
+
+## @section Git credentials (provider-agnostic, Phase 3)
+##
+## Use this stanza for all new installations. Both "gitlab" and "git" are wired
+## into the same Secret and env vars — the chart prefers git.* when both are set
+## (fail-fast validate gate prevents ambiguous dual-set).
+##
+## Token priority (highest → lowest):
+##   1. git.existingSecret   (operator-managed Secret — preferred for GitOps flows)
+##   2. git.token            (inline, stored in chart-rendered Secret)
+##   3. gitlab.existingSecret (deprecated alias — pre-0.1.0 installs)
+##   4. gitlab.token          (deprecated alias)
+git:
+  ## @param git.token Canonical git token (provider-agnostic). Ignored when git.existingSecret is set.
+  token: ""
+  ## @param git.existingSecret Name of an existing Secret containing the git token.
+  existingSecret: ""
+  ## @param git.existingSecretKey Key within git.existingSecret that holds the token.
+  existingSecretKey: token
+  ## @param git.apiUrl Optional API base URL override for GitHub Enterprise Server or self-hosted GitLab.
+  ## When empty, the provider factory derives the URL from the repoUrl host.
+  ## Examples: "https://ghe.mycompany.com/api/v3" (GitHub Enterprise), "https://gitlab.mycompany.com" (self-hosted GitLab).
+  apiUrl: ""
+  ## @param git.username Git HTTP username for token-based auth. Only needed when the token
+  ## is a user-generated PAT that requires a username prefix (GitLab user PATs). Pipeline/project
+  ## tokens and GitHub tokens do NOT need a username — they authenticate on the token alone.
+  username: "oauth2"
+
+## @section GitLab credentials (DEPRECATED — use git: above for new installations)
+##
+## These values are kept for backward compatibility with existing deployments that set
+## gitlab.token or gitlab.existingSecret. They are still fully functional and are used
+## as fallbacks when the git.* stanza above is empty.
+##
+## Migration: rename gitlab.token → git.token (or git.existingSecret → git.existingSecret)
+## and remove this stanza. The chart's validate.yaml prevents both stanzas being set
+## simultaneously to avoid ambiguity.
+gitlab:
+  ## @param gitlab.token DEPRECATED — use git.token. GitLab personal/project token (ignored if existingSecret is set).
+  token: ""
+  ## @param gitlab.username DEPRECATED — use git.username. GitLab username for user-generated tokens.
+  username: ""
+  ## @param gitlab.existingSecret DEPRECATED — use git.existingSecret. Name of an existing Secret containing the token.
+  existingSecret: ""
+  ## @param gitlab.existingSecretKey DEPRECATED — use git.existingSecretKey. Key within the existing Secret.
+  existingSecretKey: token
+
+## @section ServiceAccount
+serviceAccount:
+  ## @param serviceAccount.create Create the CronJob ServiceAccount
+  create: true
+  ## @param serviceAccount.name Override the generated ServiceAccount name
+  name: ""
+  ## @param serviceAccount.annotations Extra annotations for the ServiceAccount
+  annotations: {}
+  ## @param serviceAccount.automountServiceAccountToken Mount the SA token into the pod (required: the sync calls the Kubernetes API)
+  automountServiceAccountToken: true
+
+## @section RBAC
+rbac:
+  ## @param rbac.create Create the ClusterRole/Role + bindings the tool needs
+  create: true
+
+## @section Pod Disruption Budget
+pdb:
+  ## @param pdb.create Create a PodDisruptionBudget
+  create: false
+  ## @param pdb.minAvailable Minimum number of pods that must be available (mutually exclusive with maxUnavailable)
+  minAvailable: ""
+  ## @param pdb.maxUnavailable Maximum number of pods that can be unavailable (mutually exclusive with minAvailable; empty falls back to 1 unless minAvailable is set)
+  maxUnavailable: ""
+
+## @section Network Policy
+networkPolicy:
+  ## @param networkPolicy.enabled Enable NetworkPolicy
+  enabled: false
+  ## @param networkPolicy.allowExternal Allow connections from pods without the matching label
+  allowExternal: true
+  ## @param networkPolicy.allowExternalEgress Allow all egress traffic (required: git, k8s API, Prometheus)
+  allowExternalEgress: true
+  ## @param networkPolicy.extraIngress Extra ingress rules to add
+  extraIngress: []
+  ## @param networkPolicy.extraEgress Extra egress rules to add
+  extraEgress: []
+
+## @section Pod scheduling
+## @param podAffinityPreset Pod affinity preset: "" (disabled), soft, hard
+podAffinityPreset: ""
+## @param podAntiAffinityPreset Pod anti-affinity preset: "" (disabled), soft, hard
+podAntiAffinityPreset: ""
+## @param nodeAffinityPreset Node affinity preset
+nodeAffinityPreset:
+  ## @param nodeAffinityPreset.type Node affinity type: "" (disabled), soft, hard
+  type: ""
+  ## @param nodeAffinityPreset.key Node label key to match
+  key: ""
+  ## @param nodeAffinityPreset.values Node label values to match
+  values: []
+
+## @param affinity Raw affinity rules (overrides presets when set)
+affinity: {}
+## @param nodeSelector Node label selector for pod assignment
+nodeSelector: {}
+## @param tolerations Tolerations for pod assignment
+tolerations: []
+## @param topologySpreadConstraints Topology spread constraints
+topologySpreadConstraints: []
+## @param hostAliases Custom /etc/hosts entries for pods
+hostAliases: []
+## @param priorityClassName Priority class name
+priorityClassName: ""
+## @param schedulerName Custom scheduler name
+schedulerName: ""
+## @param terminationGracePeriodSeconds Grace period in seconds before SIGKILL
+terminationGracePeriodSeconds: 30
+
+## @section Pod metadata
+## @param podAnnotations Extra annotations for pods
+podAnnotations: {}
+## @param podLabels Extra labels for pods
+podLabels: {}
+
+## @section Security contexts
+podSecurityContext:
+  enabled: true
+  fsGroup: 1001
+  runAsUser: 1001
+  runAsGroup: 1001
+  runAsNonRoot: true
+  ## @param podSecurityContext.seccompProfile.type Seccomp profile for all containers (RuntimeDefault required by PSA `restricted`)
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  enabled: true
+  runAsNonRoot: true
+  runAsUser: 1001
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+## @param resources Container resource requests and limits
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+## @section Mutation Webhook (Phase 1 of webhook migration — see docs/webhook-migration.md in the project repo)
+##
+## When enabled, the chart deploys an additional Deployment that runs the in-cluster
+## mutating admission webhook. The webhook reads ResourceOverride CRs and patches
+## pod resources at admission time, replacing the legacy Helm/Kustomize value-tree
+## write-back. Default is disabled — opt-in cluster by cluster during migration.
+##
+## Same image as the CronJob; only the command differs (`python main.py webhook`).
+##
+webhook:
+  ## @param webhook.enabled Enable the mutation webhook Deployment, Service, MutatingWebhookConfiguration, and (when validating.enabled) the ValidatingWebhookConfiguration. The webhook owns its own serving cert through an in-process reconciler — no cert-manager dependency.
+  enabled: false
+  ## Number of webhook replicas. Trade-offs:
+  ##
+  ##   replicaCount: 1  (single-runner)
+  ##     - Brief admission gap during pod restart (failurePolicy: Ignore
+  ##       absorbs this — pods admit with chart defaults during the gap).
+  ##     - No coordination needed: cert reconciler, status writer, and
+  ##       auto-rollout watcher run exactly once cluster-wide.
+  ##     - Recommended for clusters that aren't latency-sensitive on
+  ##       brand-new pod admission AND tolerate single-replica failure
+  ##       modes (PDB blocking, node drain).
+  ##
+  ##   replicaCount: 2+ (HA)
+  ##     - Zero admission downtime — Service load-balances to whichever
+  ##       replica is up.
+  ##     - Cert reconciler: idempotent (CA rotation is monotonic, both
+  ##       replicas converge on the same caBundle).
+  ##     - Status writer: last-write-wins on `lastAppliedAt` PATCH.
+  ##       Acceptable because it's a stamp; the value is the same nanosecond
+  ##       regardless of which replica reports it.
+  ##     - Auto-rollout watcher: both replicas observe CR events, both
+  ##       schedule a debounced restart, both PATCH `restartedAt` on the
+  ##       workload's PodTemplate. The patches are idempotent (same value
+  ##       within the debounce window) but you get 2× the apiserver writes.
+  ##       Set `webhook.autoRollout.enabled: false` if running ≥ 2 replicas
+  ##       and you want stricter rollout semantics.
+  ##
+  ## @param webhook.replicaCount Number of webhook replicas (1 = single-runner; ≥ 2 for HA, see trade-offs above)
+  replicaCount: 1
+  ## @param webhook.revisionHistoryLimit Number of old ReplicaSets to retain for rollback. 0 keeps only the current one.
+  ## Default 10 (Kubernetes default). Lower values shrink the ArgoCD UI tree
+  ## for clusters that get frequent webhook image bumps; 0 means no rollback
+  ## history (`kubectl rollout undo` won't work, but live deploy is unaffected).
+  revisionHistoryLimit: 10
+  ## @param webhook.port TLS port the webhook listens on for AdmissionReview
+  port: 9443
+  ## @param webhook.metricsPort Plain-HTTP port for /healthz, /readyz, /metrics
+  metricsPort: 8080
+  ## @param webhook.failurePolicy Behaviour when webhook is unreachable. `Ignore` lets pods admit with chart defaults; `Fail` blocks the pod.
+  failurePolicy: Ignore
+  ## @param webhook.timeoutSeconds Per-request admission timeout
+  timeoutSeconds: 5
+  ## @param webhook.sideEffects Standard k8s admission field; `None` documents that the webhook does not affect external state
+  sideEffects: None
+
+  ## @param webhook.resources.requests CPU/memory requests for the webhook pod
+  ## @param webhook.resources.limits CPU/memory limits for the webhook pod
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  ## TLS — handled by an in-process cert reconciler (src/webhook_cert.py).
+  ## On first start, the webhook pod generates a self-signed CA + serving cert,
+  ## stores them in a Secret, and patches the MutatingWebhookConfiguration's
+  ## caBundle. Renewal is automatic (30 days before expiry); rotation
+  ## triggers a pod restart so aiohttp picks up the new cert. No
+  ## cert-manager dependency. The chart-level Secret is created on demand by
+  ## the reconciler — there is no template for it here.
+  ##
+  ## The MWC/VWC templates intentionally do NOT render `caBundle` (ROADMAP #58):
+  ## omitting the field means no GitOps engine owns it via SSA, so the
+  ## reconciler's injected value persists through every sync without a brief
+  ## fail-open window. Set `webhook.caBundle` ONLY when using an external PKI
+  ## (e.g. cert-manager ca-injector or a corporate CA) and you want the chart
+  ## to own the field — then configure the in-process reconciler not to
+  ## overwrite it. When set, the value is emitted into both the
+  ## MutatingWebhookConfiguration and ValidatingWebhookConfiguration.
+  ## @param webhook.caBundle Optional base64-encoded CA bundle for the webhook TLS cert (default empty → in-process reconciler owns it)
+  caBundle: ""
+
+  ## namespaceSelector — only excludes hard-coded system namespaces.
+  ##
+  ## Opt-in lives in the **annotation** `kube-resource-updater.enabled: "true"`
+  ## on the Namespace. Annotations can't be used in a `LabelSelector`
+  ## (k8s API limitation), so the webhook itself reads the annotation through
+  ## a cached Namespace informer and short-circuits before computing any
+  ## patch. The matchExpressions below cover only the unconditional excludes
+  ## (release namespace, kube-system) — every other namespace's request is
+  ## handled in code with negligible cost (one map lookup per admission).
+  ##
+  ## How to opt in: add the annotation directly to the Namespace, e.g. through
+  ## ArgoCD's `managedNamespaceMetadata`:
+  ##
+  ##   spec:
+  ##     syncPolicy:
+  ##       managedNamespaceMetadata:
+  ##         annotations:
+  ##           kube-resource-updater.enabled: "true"
+  ##
+  namespaceSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: NotIn
+        values:
+          - kube-system
+
+  ## objectSelector — annotation-only opt-out. Workloads carrying
+  ## `kube-resource-updater.skip: "true"` skip patching; same caveat as the
+  ## namespaceSelector above (annotation read in code, not via LabelSelector).
+  ## Left empty here so the webhook receives every pod in opted-in namespaces
+  ## and the skip decision is centralised next to the rest of the resolver.
+  objectSelector: {}
+
+  ## Validating webhook — rejects ResourceOverride CRs whose selector
+  ## could match the same pod as another CR while sharing a container
+  ## name. Without it, the mutating webhook resolves the conflict
+  ## silently with "last write wins" and a runtime warning; this turns
+  ## that into a clear `kubectl apply` rejection at admission time.
+  ##
+  ## On by default — selector-overlap is a class of silent corruption
+  ## you want flagged at apply time, not 6h later in a webhook log.
+  ## `failurePolicy: Ignore` (hard-coded in the template) means a
+  ## webhook outage can never block `kubectl apply`; the worst case is
+  ## "no validation runs", same as having the chart toggle off. Audit-
+  ## strict shops or clusters that don't want any extra admission
+  ## webhook flip this to false.
+  validating:
+    ## @param webhook.validating.enabled Reject CR creates/updates whose selector + container set overlaps an existing CR in the same namespace.
+    enabled: true
+
+  ## Auto-rollout — when a ResourceOverride is created or updated and
+  ## resource values actually change, restart the workloads it patches
+  ## so running pods pick up the new spec without waiting for an
+  ## unrelated event (release, node drain, scale).
+  ##
+  ## Hierarchy of opt-in (workload > namespace > helm-default):
+  ##
+  ##   metadata.annotations:
+  ##     kube-resource-updater.autoRollout: "true|false"
+  ##
+  ## on a Deployment / StatefulSet wins; otherwise the Namespace
+  ## annotation; otherwise this helm-default. Default off because pod
+  ## restarts are visible side-effects — opt in cluster-wide here, opt
+  ## out per-workload via annotation.
+  ##
+  ## Debounce coalesces rapid CR updates targeting the same workload —
+  ## a multi-CR MR merge results in one rolling restart per affected
+  ## workload, not one per CR.
+  autoRollout:
+    ## @param webhook.autoRollout.enabled Cluster-wide default for the auto-rollout hierarchy. Per-workload / per-namespace annotations override this.
+    enabled: false
+    ## @param webhook.autoRollout.debounceSeconds How long to wait after the last CR change before patching the workload's PodTemplate.
+    debounceSeconds: 30
+
+  ## Status writer — populates ResourceOverride.status.appliedToPodCount and
+  ## .status.lastAppliedAt so `kubectl get ro -A` becomes a real adoption
+  ## diagnostic. Coalesced over `flushIntervalSeconds` to keep apiserver
+  ## load proportional to the number of CRs, not the number of pod
+  ## admissions.
+  ##
+  ## Off by default not because the writer is risky (it isn't), but because
+  ## in audit-strict environments every PATCH on `.status` becomes an audit
+  ## event; opt-in keeps those clusters quiet by default. Operators who want
+  ## the diagnostic flip this to true.
+  status:
+    ## @param webhook.status.enabled Write CR.status.appliedToPodCount + lastAppliedAt; controls the RBAC verb on resourceoverrides/status too.
+    enabled: false
+    ## @param webhook.status.flushIntervalSeconds Coalesce window for the status writer (seconds).
+    flushIntervalSeconds: 30
+
+  ## ServiceMonitor for the webhook's /metrics endpoint. The CronJob has no /metrics
+  ## endpoint of its own, so this is webhook-specific.
+  metrics:
+    serviceMonitor:
+      ## @param webhook.metrics.serviceMonitor.enabled Create a ServiceMonitor for /metrics
+      enabled: false
+      ## @param webhook.metrics.serviceMonitor.namespace Namespace for the ServiceMonitor (defaults to release namespace)
+      namespace: ""
+      ## @param webhook.metrics.serviceMonitor.interval Scrape interval
+      interval: 30s
+      ## @param webhook.metrics.serviceMonitor.labels Extra labels. Must match your Prometheus operator's serviceMonitorSelector — e.g. `release: kube-prometheus-stack` (the Helm release name of your kube-prometheus-stack install). Empty by default: with a strict selector the ServiceMonitor is silently NOT scraped until this is set.
+      labels: {}
+    prometheusRule:
+      ## @param webhook.metrics.prometheusRule.enabled Create a PrometheusRule with webhook alerting rules (requires prometheus-operator). Pairs with serviceMonitor.enabled — alerts on the webhook failing open (failurePolicy: Ignore) so a down webhook pages instead of silently admitting pods with chart-default resources.
+      enabled: false
+      ## @param webhook.metrics.prometheusRule.namespace Namespace for the PrometheusRule (defaults to release namespace)
+      namespace: ""
+      ## @param webhook.metrics.prometheusRule.labels Extra labels for the PrometheusRule. Must match your Prometheus operator's ruleSelector — e.g. `release: kube-prometheus-stack`. Empty by default: with a strict selector the rules are silently NOT loaded until this is set.
+      labels: {}
+
+  ## @param webhook.podDisruptionBudget.enabled Create a PDB for the webhook Deployment. Default false because the chart's `webhook.replicaCount: 1` default plus a PDB with `minAvailable: 1` would block every node drain involving the webhook pod (single replica can't satisfy the budget). Operators who bump replicaCount to >= 2 should flip this to true. Chart's validate.yaml fails install when PDB is on with replicaCount=1.
+  ## @param webhook.podDisruptionBudget.minAvailable Minimum number of available webhook replicas
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+  ## @param webhook.nodeSelector Node selector for webhook pods
+  nodeSelector: {}
+  ## @param webhook.tolerations Tolerations for webhook pods
+  tolerations: []
+  ## @param webhook.affinity Affinity rules for webhook pods (empty = the chart applies soft anti-affinity by hostname)
+  affinity: {}
+
+## @section Extra configuration
+## @param extraEnvVars Extra environment variables
+extraEnvVars: []
+## @param extraEnvVarsCM Name of ConfigMap with extra environment variables
+extraEnvVarsCM: ""
+## @param extraEnvVarsSecret Name of Secret with extra environment variables
+extraEnvVarsSecret: ""
+## @param extraVolumes Extra volumes
+extraVolumes: []
+## @param extraVolumeMounts Extra volume mounts
+extraVolumeMounts: []
+## @param initContainers Extra init containers
+initContainers: []
+## @param sidecars Extra sidecar containers
+sidecars: []

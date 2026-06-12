@@ -1,0 +1,190 @@
+{{- if .Values.webhook.enabled -}}
+{{- /*
+Webhook Deployment. Same image as the CronJob — only the command differs:
+  CronJob:  python main.py sync
+  Webhook:  python main.py webhook --port ... --cert-dir ... --metrics-port ...
+
+The image registry/tag is resolved through the same `kube-resource-updater.image`
+helper used by the CronJob, so a single `image.tag` bump moves both forward
+together.
+
+readOnlyRootFilesystem is honoured by mounting an emptyDir at /tmp (the webhook
+writes nothing else outside the cert mount).
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels: {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.webhook.replicaCount }}
+  revisionHistoryLimit: {{ .Values.webhook.revisionHistoryLimit }}
+  selector:
+    matchLabels:
+      {{- include "kube-resource-updater.webhook.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "kube-resource-updater.webhook.selectorLabels" . | nindent 8 }}
+        {{- if .Values.podLabels }}
+        {{- toYaml .Values.podLabels | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kube-resource-updater.webhook.fullname" . }}
+      {{- with (include "kube-resource-updater.imagePullSecrets" . | trim) }}
+      {{ . | nindent 6 }}
+      {{- end }}
+      {{- with (include "kube-resource-updater.podSecurityContext" . | trim) }}
+      {{ . | nindent 6 }}
+      {{- end }}
+      {{- if or .Values.webhook.affinity (and (empty .Values.webhook.affinity) (gt (int .Values.webhook.replicaCount) 1)) }}
+      affinity:
+        {{- if .Values.webhook.affinity }}
+        {{- toYaml .Values.webhook.affinity | nindent 8 }}
+        {{- else }}
+        # Soft anti-affinity by hostname when running >1 replica — same default the
+        # rest of the chart uses for HA workloads. Override via webhook.affinity.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "kube-resource-updater.webhook.selectorLabels" . | nindent 20 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.webhook.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webhook.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: webhook
+          image: {{ include "kube-resource-updater.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          command:
+            - python
+            - main.py
+            - webhook
+            - --port
+            - {{ .Values.webhook.port | quote }}
+            - --cert-dir
+            - /var/run/kube-resource-updater/cert
+            - --metrics-port
+            - {{ .Values.webhook.metricsPort | quote }}
+          {{- with (include "kube-resource-updater.containerSecurityContext" . | trim) }}
+          {{ . | nindent 10 }}
+          {{- end }}
+          ports:
+            - name: webhook
+              containerPort: {{ .Values.webhook.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.webhook.metricsPort }}
+              protocol: TCP
+          # Probe delays are generous because the Python webhook does its
+          # initial CR list+watch bootstrap synchronously after the HTTP server
+          # comes up. Cold cluster + many CRs can push readiness past 10s.
+          # 30s gives enough slack for a clean start without flapping.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 5
+          resources: {{- toYaml .Values.webhook.resources | nindent 12 }}
+          # Pod's own namespace surfaced via the downward API so the cert
+          # reconciler can find its Secret + MutatingWebhookConfiguration
+          # without hardcoding a value.
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Status writer toggle — gates whether the webhook PATCHes
+            # ResourceOverride.status. Paired with the RBAC gate in
+            # templates/webhook/rbac.yaml: with status disabled the
+            # webhook never has the verb to write status anyway. Toggle
+            # is ALWAYS injected so the process can tell the operator
+            # opted out; the dependent tuning var is gated below (chart
+            # 1.20.0 — pre-1.20.0 the flush-interval env was injected
+            # unconditionally even with status off).
+            - name: WEBHOOK_STATUS_ENABLED
+              value: {{ .Values.webhook.status.enabled | quote }}
+            {{- if .Values.webhook.status.enabled }}
+            - name: WEBHOOK_STATUS_FLUSH_INTERVAL_SECONDS
+              value: {{ .Values.webhook.status.flushIntervalSeconds | quote }}
+            {{- end }}
+            # Auto-rollout toggle. Paired with the RBAC gate in
+            # templates/webhook/rbac.yaml: with auto-rollout disabled
+            # the webhook does not have the verb to patch Deployments /
+            # StatefulSets anyway. Same toggle/tuning split as status
+            # writer above.
+            - name: WEBHOOK_AUTO_ROLLOUT_ENABLED
+              value: {{ .Values.webhook.autoRollout.enabled | quote }}
+            {{- if .Values.webhook.autoRollout.enabled }}
+            - name: WEBHOOK_AUTO_ROLLOUT_DEBOUNCE_SECONDS
+              value: {{ .Values.webhook.autoRollout.debounceSeconds | quote }}
+            {{- end }}
+            # Validating webhook config name so the cert reconciler can
+            # patch the VWC's caBundle on first start + on drift. Empty
+            # string short-circuits every VWC code path; the chart only
+            # sets it when webhook.validating.enabled is true and the
+            # ValidatingWebhookConfiguration template renders.
+            {{- if .Values.webhook.validating.enabled }}
+            - name: WEBHOOK_VWC
+              value: {{ include "kube-resource-updater.webhook.fullname" . | quote }}
+            {{- end }}
+            # ROADMAP #31 (chart 1.22.11) — clusterDomain plumbed through so the
+            # webhook cert SAN matches the apiserver-dialed DNS suffix on
+            # clusters with custom clusterDomain (e.g. `cluster.foo.com`).
+            # Default `cluster.local` keeps every existing deployment working.
+            - name: WEBHOOK_CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | default "cluster.local" | quote }}
+            {{- with .Values.extraEnvVars }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            # The cert reconciler writes tls.crt / tls.key / ca.crt here on
+            # startup; aiohttp loads them when the TLS server binds. emptyDir
+            # is enough — the truth lives in the apiserver Secret, this is
+            # just the container-local copy. Path is outside /tmp so the two
+            # writable mounts don't overlap (some k8s versions are picky
+            # about nested mountPaths).
+            - name: cert
+              mountPath: /var/run/kube-resource-updater/cert
+            - name: tmp
+              mountPath: /tmp
+            # Same ConfigMap the CronJob mounts. Mounting it removes the
+            # deprecated-fallback warning at startup and keeps tool / webhook
+            # behaviour consistent across deployments.
+            - name: config
+              mountPath: /etc/kube-resource-updater
+              readOnly: true
+      volumes:
+        - name: cert
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: {{ include "kube-resource-updater.fullname" . }}-config
+{{- end }}

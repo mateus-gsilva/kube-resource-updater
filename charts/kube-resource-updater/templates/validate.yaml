@@ -1,0 +1,281 @@
+{{/*
+Helm-time validation. Each `fail` here aborts the render with a clear
+operator-facing message — beats producing an empty / broken release
+that the operator only discovers after `helm install` succeeds.
+
+Run-time validation (Config.validate in src/config.py) covers
+percentile ranges, duration syntax, min>max bounds, and createMr+token
+consistency. Those checks fire at sync start. The render-time checks
+below catch the "wrong shape of release" cases that runtime can't
+recover from: an empty release with both CronJob and webhook off, or a
+contradictory toggle combo.
+*/}}
+
+{{- if and (not .Values.cronjob.enabled) (not .Values.webhook.enabled) }}
+{{- fail "Both cronjob.enabled and webhook.enabled are false — the chart would render no useful workload. Enable at least one (the typical install has both true)." }}
+{{- end }}
+
+{{- if and .Values.webhook.enabled (not .Values.webhook.autoRollout.enabled) (eq (.Values.webhook.replicaCount | int) 0) }}
+{{- fail "webhook.enabled=true but webhook.replicaCount=0 — admission would never have a backend. Set replicaCount to 1 (single-runner with failurePolicy: Ignore absorbing restart gaps) or 2+ (HA)." }}
+{{- end }}
+
+{{- /*
+createMr + token consistency (chart 1.20.0). The CronJob opens GitLab
+MRs when `config.createMr: true`; that path needs a GITLAB_TOKEN, which
+the chart sources from `gitlab.token` (inline) OR `gitlab.existingSecret`
+(operator-managed). With neither set the sync runs, talks to Prometheus,
+computes overrides, clones the gitops repo, builds the diff — and then
+crashes mid-sync when GitLab returns 401 on the MR-open call. This fail
+moves that failure to `helm install/upgrade` time so the operator hits
+a clear error message instead of debugging a 401 in a CronJob log.
+
+`createMr: false` (direct push) is allowed without a token: in that
+mode the push goes through whatever git credentials the working tree
+already carries. The runtime `Config.validate` in src/config.py
+mirrors this rule for hand-edited ConfigMap drift.
+*/}}
+{{- /*
+createMr + token consistency — generalised for provider-agnostic config (Phase 3).
+Check all four token sources: git.token, git.existingSecret (new path) and
+gitlab.token, gitlab.existingSecret (deprecated aliases). A token from any one
+source is sufficient. When all four are empty with createMr=true, the sync would
+run, build the diff, push the branch, then crash on MR-open with a 401.
+*/}}
+{{- if and .Values.cronjob.enabled (eq (toString (.Values.config.createMr | default false)) "true") (not .Values.git.token) (not .Values.git.existingSecret) (not .Values.gitlab.token) (not .Values.gitlab.existingSecret) }}
+{{- fail "config.createMr=true but no git token is set — the MR-open call will get 401 mid-sync. Set a token via git.token, git.existingSecret, gitlab.token, or gitlab.existingSecret; or set config.createMr=false to push direct." }}
+{{- end }}
+
+{{- /*
+prometheusUrl required (chart 1.20.0). Auto-discovery was dropped — the
+tool needs an explicit Prometheus URL to query for usage data. Failing
+at render time gives the operator a clear missing-config error before
+any cluster state is touched. Runtime `Config.validate` mirrors this
+check for hand-edited ConfigMap drift.
+
+The CronJob is the consumer of this URL; the webhook never queries
+Prometheus directly (admission requests carry the Pod object inline).
+Skip the check when `cronjob.enabled: false` — webhook-only installs
+don't need a URL.
+*/}}
+{{- if and .Values.cronjob.enabled (not (.Values.config.prometheusUrl | default "")) }}
+{{- fail "config.prometheusUrl is empty — required since chart 1.20.0 (auto-discovery was removed). Set it to a reachable Prometheus URL, e.g. http://prometheus-operated.monitoring.svc.cluster.local:9090 for kube-prometheus-stack." }}
+{{- end }}
+
+{{- /*
+config.gitProvider validation (Phase 3). Allowed values: "" (empty = auto-detect),
+"auto", "gitlab", "github". An unrecognized value silently uses the auto-detection
+fallback at runtime, hiding a likely typo from the operator.
+*/}}
+{{- $gitProvider := .Values.config.gitProvider | default "" | lower }}
+{{- if and $gitProvider (not (has $gitProvider (list "" "auto" "gitlab" "github"))) }}
+{{- fail (printf "config.gitProvider = %q is not a valid provider. Allowed values: '' (auto-detect), 'auto', 'gitlab', 'github'. Omit the field or set one of the listed values." .Values.config.gitProvider) }}
+{{- end }}
+
+{{- /*
+Leading-slash crWriteback.path (chart 1.21.0, audit v2 finding D11):
+os.path.join(repo_dir, absolute_path) returns absolute_path — the
+tool would try to write to /<path>/... on the container filesystem
+instead of into the cloned repo. Reject at install time.
+*/}}
+{{- if hasPrefix "/" (.Values.config.crWriteback.path | default "") }}
+{{- fail (printf "config.crWriteback.path = %q starts with '/' — paths are repo-relative. A leading slash makes Python's os.path.join discard the repo directory. Remove the leading slash." .Values.config.crWriteback.path) }}
+{{- end }}
+
+{{- /*
+Empty image.tag is valid: the image helper (_helpers.tpl) falls back
+to .Chart.AppVersion, so the pod always pulls a pinned reference.
+No tag/digest gate is needed — `<repo>:` cannot render by construction.
+*/}}
+
+{{- /*
+CronJob numeric fields that k8s admission rejects when negative —
+catch with a clear chart-level message instead of relying on the
+apiserver's generic 'spec.foo: Invalid value' on apply.
+*/}}
+{{- if .Values.cronjob.enabled }}
+  {{- range $name, $val := dict
+      "backoffLimit"               (.Values.cronjob.backoffLimit               | default 0 | int)
+      "successfulJobsHistoryLimit" (.Values.cronjob.successfulJobsHistoryLimit | default 0 | int)
+      "failedJobsHistoryLimit"     (.Values.cronjob.failedJobsHistoryLimit     | default 0 | int)
+      "ttlSecondsAfterFinished"    (.Values.cronjob.ttlSecondsAfterFinished    | default 0 | int)
+      "activeDeadlineSeconds"      (.Values.cronjob.activeDeadlineSeconds      | default 0 | int)
+  }}
+    {{- if lt $val 0 }}
+      {{- fail (printf "cronjob.%s = %d must be >= 0 (k8s admission rejects negative values)." $name $val) }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+
+{{- /*
+PDB: pdb.minAvailable AND pdb.maxUnavailable are mutually exclusive
+per the k8s PodDisruptionBudget spec. apiserver rejects with `must
+not specify both minAvailable and maxUnavailable`. Catch at install.
+The chart's CronJob PDB (templates/pdb.yaml) gates on pdb.create;
+the webhook PDB (templates/webhook/pdb.yaml) is independent.
+*/}}
+{{- if .Values.pdb.create }}
+  {{- if and (.Values.pdb.minAvailable | toString) (.Values.pdb.maxUnavailable | toString)
+             (ne (.Values.pdb.minAvailable | toString) "") (ne (.Values.pdb.maxUnavailable | toString) "") }}
+    {{- fail "pdb.minAvailable and pdb.maxUnavailable are both set — k8s PodDisruptionBudget requires exactly one. Pick one and unset the other." }}
+  {{- end }}
+{{- end }}
+
+{{- /*
+Webhook PDB blocking single-replica drains: PDB with minAvailable=1
+(default) + replicaCount=1 means node drains involving the webhook
+pod block forever (PDB rejects every eviction). Operator drain of
+the only node hosting the webhook fails — typically a surprise during
+cluster upgrades. Force replicaCount >= 2 when PDB is on.
+*/}}
+{{- if and .Values.webhook.enabled
+           .Values.webhook.podDisruptionBudget.enabled
+           (eq (.Values.webhook.replicaCount | int) 1) }}
+  {{- fail "webhook.podDisruptionBudget.enabled=true with webhook.replicaCount=1 — the PDB's default minAvailable=1 would block every node drain involving the webhook pod (no replica left to satisfy the budget). Bump replicaCount to >= 2 to enable PDB, or disable the PDB for single-replica installs (failurePolicy: Ignore absorbs the brief admission gap during restarts)." }}
+{{- end }}
+
+{{- /*
+Webhook failurePolicy must be Ignore or Fail (k8s admission enum).
+Any other value gets the apiserver to reject the MWC/VWC apply with
+a generic "Unsupported value" message. Catch at install with a
+clearer message.
+Also: `Fail` + replicaCount=1 is dangerous — admission breaks during
+the brief restart gap. Force replicaCount >= 2 OR Ignore.
+*/}}
+{{- if .Values.webhook.enabled }}
+  {{- $fp := .Values.webhook.failurePolicy | default "Ignore" }}
+  {{- if not (or (eq $fp "Ignore") (eq $fp "Fail")) }}
+    {{- fail (printf "webhook.failurePolicy = %q is invalid — must be 'Ignore' or 'Fail' per k8s admission spec." $fp) }}
+  {{- end }}
+  {{- if and (eq $fp "Fail") (eq (.Values.webhook.replicaCount | int) 1) }}
+    {{- fail "webhook.failurePolicy=Fail with webhook.replicaCount=1 — admission would block (reject every pod) during the brief restart gap. Bump replicaCount >= 2 OR use failurePolicy: Ignore (default; absorbs the restart gap with chart defaults applied during the window)." }}
+  {{- end }}
+
+  {{- /*
+  Webhook port + metricsPort cannot collide. apiserver would reject
+  the Service with duplicate-port-name, but more confusingly the pod
+  would also fail to bind one of the listeners (port already in use).
+  */}}
+  {{- $p1 := .Values.webhook.port        | int }}
+  {{- $p2 := .Values.webhook.metricsPort | int }}
+  {{- if eq $p1 $p2 }}
+    {{- fail (printf "webhook.port (%d) == webhook.metricsPort (%d) — both listeners can't bind the same port on the same pod. Defaults are 9443 (port) + 8080 (metrics)." $p1 $p2) }}
+  {{- end }}
+  {{- if or (lt $p1 1) (gt $p1 65535) }}
+    {{- fail (printf "webhook.port = %d is outside the valid TCP port range [1, 65535]." $p1) }}
+  {{- end }}
+  {{- if or (lt $p2 1) (gt $p2 65535) }}
+    {{- fail (printf "webhook.metricsPort = %d is outside the valid TCP port range [1, 65535]." $p2) }}
+  {{- end }}
+{{- end }}
+
+{{- /*
+Log level must be one of the standard Python logging levels. Pre-1.21.0,
+an invalid value (`logLevel: "BANANA"`) was silently coerced to INFO by
+`getattr(logging, level, logging.INFO)`. Catch the typo at install time.
+*/}}
+{{- $ll := .Values.config.logLevel | default "INFO" | upper }}
+{{- if not (has $ll (list "DEBUG" "INFO" "WARNING" "WARN" "ERROR" "CRITICAL")) }}
+  {{- fail (printf "config.logLevel = %q is not a valid Python logging level (DEBUG / INFO / WARNING / ERROR / CRITICAL)." .Values.config.logLevel) }}
+{{- end }}
+
+{{- /*
+Min > max bounds at helm-install time (chart 1.21.0). Per-workload
+annotation merge can still produce min > max at runtime (caught by
+`_build_containers_payload` with a per-workload skip + warning), but
+catching the helm-level case here gives the operator a single clear
+error message before any pod runs. Runtime `Config.validate` mirrors
+this for hand-edited ConfigMap drift.
+*/}}
+{{- range $name, $pair := dict
+    "CpuRequest"    (list .Values.config.minCpuRequestM      .Values.config.maxCpuRequestM)
+    "MemoryRequest" (list .Values.config.minMemoryRequestMi  .Values.config.maxMemoryRequestMi)
+    "CpuLimit"      (list .Values.config.minCpuLimitM        .Values.config.maxCpuLimitM)
+    "MemoryLimit"   (list .Values.config.minMemoryLimitMi    .Values.config.maxMemoryLimitMi)
+}}
+  {{- $min := index $pair 0 | default 0 | int }}
+  {{- $max := index $pair 1 | default 0 | int }}
+  {{- if and (gt $min 0) (gt $max 0) (gt $min $max) }}
+    {{- fail (printf "config.min%s (%d) > config.max%s (%d) — any computed value would be clamped outside the stated bounds. Set min < max or 0=disabled." $name $min $name $max) }}
+  {{- end }}
+{{- end }}
+
+{{- /*
+gitlab.token AND gitlab.existingSecret both set (chart 1.21.0). The
+`gitlabSecretName` helper picks `existingSecret` first, so a hand-set
+`token` becomes dead config. Operators who later opt into existingSecret
+but forget to remove the inline token leak the unused value through
+the rendered Secret (the chart wouldn't even render the inline
+Secret because its gate is `(not existingSecret) AND token`, so the
+token literally vanishes — fail loudly here so the operator removes
+ONE of them deliberately).
+*/}}
+{{- /*
+Duplicate token source checks — prevent ambiguous configuration.
+Rule 1: git.token + git.existingSecret both set (new stanza).
+Rule 2: gitlab.token + gitlab.existingSecret both set (deprecated stanza).
+Both checks apply independently; only one source per stanza is allowed.
+*/}}
+{{- if and .Values.git.token .Values.git.existingSecret }}
+{{- fail "git.token AND git.existingSecret are BOTH set — pick one. git.existingSecret takes precedence and the inline git.token would be rendered into a Secret that the chart then ignores." }}
+{{- end }}
+{{- if and .Values.gitlab.token .Values.gitlab.existingSecret }}
+{{- fail "gitlab.token AND gitlab.existingSecret are BOTH set — pick one. existingSecret takes precedence and the inline token becomes dead config (the chart's Secret template is gated to skip when existingSecret is set, so the token is never rendered into a Secret at all)." }}
+{{- end }}
+
+{{- /*
+Webhook admission timeout must fit within the k8s admission spec
+(1..30s). Catching at helm-install time produces a clearer error than
+the apiserver's "spec.webhooks[0].timeoutSeconds: Invalid value:
+must be 1..30 seconds" on apply.
+*/}}
+{{- if .Values.webhook.enabled }}
+  {{- $t := .Values.webhook.timeoutSeconds | int }}
+  {{- if or (lt $t 1) (gt $t 30) }}
+    {{- fail (printf "webhook.timeoutSeconds = %d is outside the k8s admission spec range [1, 30] seconds. Default is 5; bump conservatively." $t) }}
+  {{- end }}
+  {{- /*
+  Auto-rollout debounce: 0 makes rollout fire immediately on every
+  ResourceOverride change with no coalescing, defeating the feature's
+  purpose. Negative or very large values are also operator errors.
+  */}}
+  {{- if .Values.webhook.autoRollout.enabled }}
+    {{- $d := .Values.webhook.autoRollout.debounceSeconds | int }}
+    {{- if lt $d 1 }}
+      {{- fail (printf "webhook.autoRollout.debounceSeconds = %d must be >= 1 (default 30). Lower values fire a rollout for every CR change with no coalescing; use webhook.autoRollout.enabled=false to disable the feature outright." $d) }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+
+{{- /*
+CronJob schedule cannot be empty or whitespace — k8s accepts empty
+strings into the spec but the controller never fires the Job. Sync
+appears installed but never runs. The chart default in values.yaml
+matches almost every use case; rejecting empty here forces the
+operator to think about it.
+*/}}
+{{- if .Values.cronjob.enabled }}
+  {{- $sched := .Values.cronjob.schedule | default "" | trim }}
+  {{- if eq $sched "" }}
+    {{- fail "cronjob.schedule is empty — the CronJob would be installed but never fire. Set a real schedule (default '0 */6 * * *' = every 6 hours; '*/10 * * * *' = every 10 min for OOM-heavy clusters)." }}
+  {{- end }}
+{{- end }}
+
+{{- /*
+Zero-component duration windows at helm-install time (chart 1.21.0,
+audit v2 finding B3). The Prom-duration regex accepts `0s`/`0h`/etc
+syntactically; runtime `Config.validate` rejects them; we mirror here.
+*/}}
+{{- range $name, $val := dict
+    "cpuRequestWindow" (.Values.config.cpuRequestWindow | default "")
+    "memRequestWindow" (.Values.config.memRequestWindow | default "")
+    "cpuLimitWindow"   (.Values.config.cpuLimitWindow | default "")
+    "memLimitWindow"   (.Values.config.memLimitWindow | default "")
+}}
+  {{- if $val }}
+    {{- $hasNonzero := regexMatch "[1-9]" $val }}
+    {{- $isPromFormat := regexMatch "^([0-9]+(s|m|h|d|w|y))+$" $val }}
+    {{- if and $isPromFormat (not $hasNonzero) }}
+      {{- fail (printf "config.%s = %q is a zero-length Prometheus window — every query returns no data, sync would write floor-only CRs everywhere. Set a real window (e.g. '3d' for request, '7d' for limit)." $name $val) }}
+    {{- end }}
+  {{- end }}
+{{- end }}

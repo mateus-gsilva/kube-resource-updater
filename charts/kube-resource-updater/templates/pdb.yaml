@@ -1,0 +1,23 @@
+{{- /* CronJob-related PDB. Webhook has its own PDB at templates/webhook/pdb.yaml. */ -}}
+{{- if and .Values.pdb.create .Values.cronjob.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kube-resource-updater.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "kube-resource-updater.labels" . | nindent 4 }}
+  {{- with (include "kube-resource-updater.annotations" .) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "kube-resource-updater.selectorLabels" . | nindent 6 }}
+  {{- if .Values.pdb.minAvailable }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- else }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable | default 1 }}
+  {{- end }}
+{{- end }}

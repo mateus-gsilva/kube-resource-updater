@@ -1,0 +1,247 @@
+{{- if .Values.webhook.enabled -}}
+{{- /*
+ResourceOverride CRD — declarative resource overrides applied by the mutation webhook.
+
+Schema design notes:
+  - Cluster-scoped CRD, namespace-scoped resource. Each CR lives in the namespace
+    of the workload it overrides. This keeps RBAC simple (per-namespace Role) and
+    matches the GitOps file layout (one folder per namespace).
+  - matchLabels-only selector for v1. matchExpressions can be added in v1 minor
+    revisions without breaking existing CRs (additive change).
+  - status subresource: written by the webhook's StatusUpdater
+    (`src/webhook_status.py`) when `webhook.status.enabled` is true.
+    Currently emits `lastAppliedAt`, a `patchedContainers` list (container
+    names this CR actually patched), and an `Applied` condition (status True,
+    reason PodPatched); `appliedToPodCount` is kept in the schema as an
+    unused field for forward compatibility (operators who set it manually
+    won't have their CRs rejected).
+*/}}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: resourceoverrides.kube-resource-updater.io
+  labels: {{- include "kube-resource-updater.labels" . | nindent 4 }}
+  annotations:
+    # Keep the CRD on `helm uninstall` so the user's ResourceOverride CRs are
+    # NOT cascade-deleted (silent, irreversible data loss). Standard for
+    # chart-shipped CRDs (cert-manager, prometheus-operator). Removing the CRD
+    # is then a deliberate manual `kubectl delete crd resourceoverrides...`.
+    "helm.sh/resource-policy": keep
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  group: kube-resource-updater.io
+  scope: Namespaced
+  names:
+    plural: resourceoverrides
+    singular: resourceoverride
+    kind: ResourceOverride
+    shortNames:
+      - ro
+    categories:
+      - all
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Containers
+          type: string
+          jsonPath: .spec.containers[*].name
+        # Last-applied is the freshness signal. `<none>` + non-trivial
+        # AGE means the CR has never patched a pod (selector mismatch
+        # or workload missing) — operator-actionable. `<none>` + small
+        # AGE just means the CR is freshly created.
+        - name: Last-applied
+          type: date
+          jsonPath: .status.lastAppliedAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [selector, containers]
+              properties:
+                selector:
+                  type: object
+                  description: |
+                    Pods in the same namespace whose labels satisfy matchLabels are eligible
+                    for patching by this override. matchExpressions is reserved for future use.
+                  required: [matchLabels]
+                  properties:
+                    matchLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      minProperties: 1
+                containers:
+                  type: array
+                  minItems: 1
+                  # maxItems: cost-bounding for CEL rule estimation. 50 containers
+                  # is well above any realistic workload; the apiserver uses this
+                  # bound when estimating per-rule evaluation cost.
+                  maxItems: 50
+                  # x-kubernetes-list-type: map + x-kubernetes-list-map-keys enforce
+                  # unique container names at the apiserver structural-schema layer —
+                  # no CEL needed, no cost budget consumed. Without this, two entries
+                  # with the same name silently last-win; the webhook would apply both
+                  # to the same container with the second overwriting the first.
+                  # (Audit #41.)
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: ["name"]
+                  description: |
+                    Per-container overrides. The webhook matches each entry to a pod container
+                    by exact name (regular containers and init containers are both eligible).
+                    Containers not listed here are not patched.
+                  items:
+                    type: object
+                    required: [name]
+                    # CEL validations run at the apiserver schema layer, independent of
+                    # the validating webhook. Rules are scoped to the container item object
+                    # so they can reference both self.requests and self.limits in the same
+                    # expression. The has() + "key" in self.field guards are required
+                    # because requests/limits are optional fields.
+                    #
+                    # CEL string literals: double-quoted. Backslash in a YAML block scalar
+                    # is literal, so \\. in the file source becomes \\. in the rule string
+                    # that CEL receives. CEL double-quoted string: \\ = one backslash.
+                    # RE2 then sees \. = literal dot. Do NOT use single-quoted CEL strings
+                    # here: the apiserver CEL tokeniser rejects unrecognised \-escapes
+                    # (like \.) inside single-quoted string literals.
+                    #
+                    # Cost budget: cost estimator requires bounded sizes. requests/limits
+                    # have maxProperties: 16 and their string values have maxLength: 20;
+                    # containers array has maxItems: 50. With these bounds all 6 rules
+                    # are within the per-expression budget of 1,000,000. (Audit #41/#42.)
+                    x-kubernetes-validations:
+                      # ── requests ≤ limits (cross-field, audit #41) ───────────────────
+                      - rule: >-
+                          !has(self.requests) || !has(self.limits) ||
+                          !("memory" in self.requests) || !("memory" in self.limits) ||
+                          quantity(self.requests["memory"]).compareTo(quantity(self.limits["memory"])) <= 0
+                        message: "requests.memory must not exceed limits.memory"
+                      - rule: >-
+                          !has(self.requests) || !has(self.limits) ||
+                          !("cpu" in self.requests) || !("cpu" in self.limits) ||
+                          quantity(self.requests["cpu"]).compareTo(quantity(self.limits["cpu"])) <= 0
+                        message: "requests.cpu must not exceed limits.cpu"
+                      # ── per-unit: CPU must not carry binary SI suffixes (audit #42) ───
+                      # CPU quantities are expressed as cores (plain number) or millicores
+                      # (number + "m"). Binary SI suffixes (Mi, Gi, ...) are accepted by
+                      # the generic Quantity pattern but are semantically wrong for CPU
+                      # the apiserver Quantity parser treats "256Mi" as ~268 million cores.
+                      - rule: >-
+                          !has(self.requests) || !("cpu" in self.requests) ||
+                          self.requests["cpu"].matches("^([0-9]+(\\.[0-9]+)?|\\.[0-9]+)(m)?$")
+                        message: "requests.cpu must be a CPU quantity (e.g. '100m', '0.5', '2') — binary suffixes like Mi are not valid for CPU"
+                      - rule: >-
+                          !has(self.limits) || !("cpu" in self.limits) ||
+                          self.limits["cpu"].matches("^([0-9]+(\\.[0-9]+)?|\\.[0-9]+)(m)?$")
+                        message: "limits.cpu must be a CPU quantity (e.g. '200m', '1', '2.5') — binary suffixes like Mi are not valid for CPU"
+                      # ── per-unit: memory must not carry the millicores suffix (audit #42) ──
+                      # Memory quantities use byte-based suffixes (Ki, Mi, Gi, ...) or plain
+                      # byte count. The "m" suffix (milli-bytes) is valid Quantity grammar
+                      # but rounds to 0 in the scheduler — requests.memory: "100m" means
+                      # 0 bytes and causes immediate OOM kill.
+                      - rule: >-
+                          !has(self.requests) || !("memory" in self.requests) ||
+                          self.requests["memory"].matches("^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|[kKMGTPE])?$")
+                        message: "requests.memory must be a memory quantity (e.g. '256Mi', '1Gi') — the 'm' (millicores) suffix is not valid for memory"
+                      - rule: >-
+                          !has(self.limits) || !("memory" in self.limits) ||
+                          self.limits["memory"].matches("^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|[kKMGTPE])?$")
+                        message: "limits.memory must be a memory quantity (e.g. '512Mi', '2Gi') — the 'm' (millicores) suffix is not valid for memory"
+                    properties:
+                      name:
+                        type: string
+                        minLength: 1
+                        # K8s DNS_LABEL_NAME max — container names longer than
+                        # this fail pod creation anyway; rejecting at CRD apply
+                        # gives a clearer error than the kubelet-time failure.
+                        # (Audit v3 front 8.)
+                        maxLength: 63
+                      requests:
+                        type: object
+                        # Kubernetes resource quantities are strings in our convention
+                        # ("100m", "256Mi"). Using `type: string` keeps the schema
+                        # structural — anyOf branches with `type` are forbidden by
+                        # the apiextensions structural-schema rules unless paired
+                        # with x-kubernetes-int-or-string, which we don't need
+                        # because the sync tool always emits strings.
+                        #
+                        # `pattern` validates against the k8s Quantity grammar:
+                        # mantissa (`[0-9]+(\.[0-9]+)?`) + optional suffix — either
+                        # a decimal exponent (`e+N` / `E-N`) or a binary SI
+                        # suffix (`Ki`/`Mi`/`Gi`/`Ti`/`Pi`/`Ei`) or a decimal
+                        # SI suffix (`m`/`k`/`M`/`G`/`T`/`P`/`E`). Catches typos
+                        # like `"100QB"` at apply time instead of pod admission.
+                        # (Audit v3 front 8.)
+                        #
+                        # Mantissa grammar is intentionally positive-only (`[0-9]+`
+                        # leading digit, at most one decimal point). The original
+                        # `[+-]?[0-9.]+` was too loose: it accepted `"."`, `"1..2"`,
+                        # `"1.2.3"`, and `"+100m"` — none of which k8s parses as a
+                        # valid Quantity. The tool never emits signed values (CPU is
+                        # always `"{n}m"`, memory always `"{n}Mi"` / `"{n}Gi"`), so
+                        # the sign support was dead weight. Sign prefix dropped; lone
+                        # dot and multi-dot mantissas blocked by requiring `[0-9]+`
+                        # before and after the (optional) decimal point.
+                        #
+                        # `additionalProperties` keeps the schema open so extended
+                        # resources (nvidia.com/gpu, hugepages-1Gi, ephemeral-storage)
+                        # are not rejected. The CEL per-unit rules above only constrain
+                        # the well-known cpu and memory keys.
+                        #
+                        # maxProperties + maxLength(additionalProperties): required by
+                        # the CEL cost estimator to produce a finite bound. 16 resource
+                        # types covers cpu + memory + 14 extended resources. 20-char max
+                        # covers all standard Quantity strings (Principle 6 bound: 18
+                        # chars) with a 2-char safety margin.
+                        maxProperties: 16
+                        additionalProperties:
+                          type: string
+                          maxLength: 20
+                          pattern: '^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+|[KMGTPE]i|[kmKMGTPE])?$'
+                      limits:
+                        type: object
+                        maxProperties: 16
+                        additionalProperties:
+                          type: string
+                          maxLength: 20
+                          pattern: '^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+|[KMGTPE]i|[kmKMGTPE])?$'
+            status:
+              type: object
+              properties:
+                appliedToPodCount:
+                  type: integer
+                  format: int32
+                lastAppliedAt:
+                  type: string
+                  format: date-time
+                patchedContainers:
+                  type: array
+                  items:
+                    type: string
+                  description: >-
+                    Container names this ResourceOverride has actually patched.
+                    Empty list means the CR matched no pods since the last admission.
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type:    { type: string }
+                      status:  { type: string }
+                      reason:  { type: string }
+                      message: { type: string }
+                      lastTransitionTime: { type: string, format: date-time }
+{{- end }}

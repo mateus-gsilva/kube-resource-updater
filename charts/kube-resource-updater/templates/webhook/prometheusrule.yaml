@@ -1,0 +1,143 @@
+{{- if and .Values.webhook.enabled .Values.webhook.metrics.prometheusRule.enabled -}}
+{{- /*
+PrometheusRule that pages on webhook failure modes.
+
+Background: the MutatingWebhookConfiguration uses failurePolicy: Ignore.
+When the webhook Deployment is down or crashing, the apiserver skips the
+webhook entirely and admits pods with whatever resources their chart
+rendered — silently, with nothing alerting on it. That silent-bypass failure
+mode is exactly what this PrometheusRule exists to catch (bug #12).
+
+Four signals:
+  1. KubeResourceUpdaterWebhookDown       — webhook target is down (Prometheus
+     can no longer scrape the /metrics endpoint). Leads to fail-open within
+     minutes if admission traffic is ongoing.
+  2. KubeResourceUpdaterWebhookFailingOpen — apiserver has already decided to
+     admit pods without calling this webhook (fail_open_count on the MWC
+     crossed zero). Immediate page — pods are admitting with wrong resources
+     NOW.
+  3. KubeResourceUpdaterValidatingWebhookFailingOpen — same for the validating
+     webhook; less critical (no resource patches happen), but overlap-check
+     silently degrades to pre-1.0.0 behaviour.
+  4. KubeResourceUpdaterWebhookErrors     — admission handler returning errors
+     (5xx or panic-recover). Upstream of fail-open; catch before it triggers #2.
+
+Gating: requires both webhook.enabled AND webhook.metrics.prometheusRule.enabled.
+Alert 3 additionally requires webhook.validating.enabled — that webhook is
+opt-in and the apiserver metric won't exist when the VWC isn't registered.
+
+kube-prometheus-stack ruleSelector: the labels block below defaults to
+`release: kp` — adjust to match your kube-prometheus-stack Helm release
+name. Override via webhook.metrics.prometheusRule.labels.
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+  namespace: {{ default .Release.Namespace .Values.webhook.metrics.prometheusRule.namespace | quote }}
+  labels:
+    {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+    {{- with .Values.webhook.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: kube-resource-updater.webhook
+      rules:
+        {{- /*
+        Alert 1: webhook Deployment is unreachable by Prometheus.
+        Selectors use the webhook fullname helper so they track fullnameOverride
+        and releaseName — hardcoding the string here would silently break on a
+        renamed release. The `namespace` label is the release namespace so the
+        selector matches the ServiceMonitor's namespaceSelector exactly.
+        */}}
+        - alert: KubeResourceUpdaterWebhookDown
+          expr: |
+            up{job="{{ include "kube-resource-updater.webhook.fullname" . }}", service="{{ include "kube-resource-updater.webhook.fullname" . }}", namespace="{{ .Release.Namespace }}"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "kube-resource-updater webhook is down"
+            description: >-
+              The kube-resource-updater webhook pod in namespace {{ .Release.Namespace }}
+              has been unreachable for 2 minutes. Because the MutatingWebhookConfiguration
+              uses failurePolicy: Ignore, the apiserver will skip the webhook and admit
+              pods with unpatched (chart-default) resources. Restart the webhook
+              Deployment and verify the /metrics endpoint is reachable before closing.
+              Runbook: check `kubectl rollout status deployment/{{ include "kube-resource-updater.webhook.fullname" . }} -n {{ .Release.Namespace }}`
+              and `kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=webhook --tail=100`.
+
+        {{- /*
+        Alert 2: apiserver has confirmed fail-open on the MWC.
+        The `name` field value "pods.kube-resource-updater.io" is the literal
+        webhook name set in mutatingwebhookconfiguration.yaml line 38.
+        If that literal ever changes, this selector must change in lockstep.
+        */}}
+        - alert: KubeResourceUpdaterWebhookFailingOpen
+          expr: |
+            increase(apiserver_admission_webhook_fail_open_count{job="apiserver", name="pods.kube-resource-updater.io", type="admit"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "kube-resource-updater mutating webhook is failing open"
+            description: >-
+              The Kubernetes apiserver has admitted pods without calling the
+              kube-resource-updater mutating webhook (failurePolicy: Ignore triggered).
+              Pods are being admitted with unpatched resources RIGHT NOW.
+              This counter is sourced from apiserver_admission_webhook_fail_open_count
+              (type=admit, name=pods.kube-resource-updater.io). Investigate webhook pod
+              health immediately: `kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=webhook`.
+
+        {{- if .Values.webhook.validating.enabled }}
+        {{- /*
+        Alert 3: fail-open on the ValidatingWebhookConfiguration.
+        Only rendered when webhook.validating.enabled=true because the VWC is
+        opt-in — the apiserver series won't exist when the VWC isn't registered,
+        and the alert would fire on absent() or never resolve.
+        The `name` field value "resourceoverrides.kube-resource-updater.io" is
+        the literal webhook name set in validatingwebhookconfiguration.yaml line 29.
+        If that literal ever changes, this selector must change in lockstep.
+        */}}
+        - alert: KubeResourceUpdaterValidatingWebhookFailingOpen
+          expr: |
+            increase(apiserver_admission_webhook_fail_open_count{job="apiserver", name="resourceoverrides.kube-resource-updater.io", type="validating"}[5m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "kube-resource-updater validating webhook is failing open"
+            description: >-
+              The Kubernetes apiserver has skipped the kube-resource-updater
+              validating webhook (failurePolicy: Ignore triggered on the VWC).
+              ResourceOverride overlap validation is not running — conflicting
+              CRs may be applied without rejection. This degrades to the
+              pre-validation behaviour but does not cause resource-patch
+              failures on its own. Investigate webhook pod health:
+              `kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=webhook`.
+        {{- end }}
+
+        {{- /*
+        Alert 4: admission handler returning errors.
+        This is upstream of fail-open: sustained errors will eventually
+        exhaust the webhook's timeoutSeconds budget and cause the apiserver
+        to fall back to the failurePolicy. Catch here before that happens.
+        Selector mirrors the ServiceMonitor's job label (webhook fullname helper).
+        */}}
+        - alert: KubeResourceUpdaterWebhookErrors
+          expr: |
+            rate(resource_updater_webhook_admission_errors_total{job="{{ include "kube-resource-updater.webhook.fullname" . }}", namespace="{{ .Release.Namespace }}"}[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "kube-resource-updater webhook admission errors"
+            description: >-
+              The kube-resource-updater webhook has been returning admission errors
+              for 5 minutes (resource_updater_webhook_admission_errors_total is
+              increasing). Sustained errors will cause the apiserver to exceed the
+              webhook timeoutSeconds budget and trigger failurePolicy: Ignore, admitting
+              pods with unpatched resources. Check webhook logs:
+              `kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=webhook --tail=200`.
+{{- end }}

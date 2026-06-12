@@ -1,0 +1,27 @@
+# Patterns excluded from `helm package` output. Smaller chart tarball,
+# faster `helm pull`, less noise in the registry.
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.orig
+*.swp
+*.swo
+*~
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.idea/
+.vscode/
+
+# Local maintainer notes — never relevant to a chart consumer.
+CLAUDE.md
+README.md
+
+# CI metadata
+.gitlab-ci.yml
+.github/

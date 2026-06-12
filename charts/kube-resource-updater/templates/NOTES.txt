@@ -1,0 +1,34 @@
+CHART NAME: {{ .Chart.Name }}
+CHART VERSION: {{ .Chart.Version }}
+APP VERSION: {{ .Chart.AppVersion }}
+
+kube-resource-updater has been deployed as a CronJob.
+
+Schedule: {{ .Values.cronjob.schedule }} ({{ .Values.cronjob.timeZone }})
+Mode:     {{ if .Values.config.dryRun }}DRY RUN (no git operations){{ else if .Values.config.createMr }}MR{{ else }}direct push{{ end }}
+Namespace: {{ .Release.Namespace }}
+
+To trigger a manual run:
+  kubectl create job --from=cronjob/{{ include "kube-resource-updater.fullname" . }} \
+    {{ include "kube-resource-updater.fullname" . }}-manual-$(date +%s) \
+    -n {{ .Release.Namespace }}
+
+To watch logs:
+  kubectl logs -n {{ .Release.Namespace }} \
+    -l app.kubernetes.io/name={{ include "kube-resource-updater.name" . }} \
+    --tail=100 -f
+
+{{- if not (or .Values.git.existingSecret .Values.git.token .Values.gitlab.existingSecret .Values.gitlab.token) }}
+
+WARNING: No git token configured.
+Set git.token or git.existingSecret in your values (required when
+config.createMr is true; gitlab.* remain as deprecated aliases).
+{{- end }}
+{{- if .Values.webhook.enabled }}
+
+NOTE: The webhook ServiceAccount holds list/watch on Secrets in
+{{ .Release.Namespace }} (k8s RBAC cannot narrow those verbs via
+resourceNames; the cert reconciler needs them for its serving-cert
+Secret). Mitigation: keep the webhook in its own namespace with no
+other Secret-bearing workloads.
+{{- end }}

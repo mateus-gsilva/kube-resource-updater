@@ -1,0 +1,21 @@
+# Tooling config only — the tool is deployed as a container image (see
+# Dockerfile), not installed as a package, so there is intentionally no
+# [project] section / entry point here.
+
+[tool.ruff]
+target-version = "py312"
+# The codebase predates a formatter; rule selection is correctness-focused
+# (pyflakes + the error-class pycodestyle groups). Style/line-length rules
+# are intentionally not enabled — see CONTRIBUTING.md.
+lint.select = ["E4", "E7", "E9", "F"]
+# E701/E702: compact `if cond: return x` one-liners are an accepted local
+# idiom (delta formatters, guard clauses); not a correctness signal.
+lint.ignore = ["E701", "E702"]
+
+[tool.ruff.lint.per-file-ignores]
+# tools/* scripts insert the repo root into sys.path before importing src.*;
+# the late imports are the point, not an accident.
+"tools/*" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

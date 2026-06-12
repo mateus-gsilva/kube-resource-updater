@@ -1,0 +1,135 @@
+{{- if .Values.webhook.enabled -}}
+{{- /*
+Webhook RBAC — split between cluster scope (cluster-scoped or
+multi-namespace resources) and the release namespace (the cert Secret).
+Grants only the minimum needed:
+
+  ClusterRole (cluster-scoped operations):
+    - resourceoverrides[/status]:           CR cache informer + future status patch
+    - namespaces:                           NamespaceCache informer (opt-in filter)
+    - mutatingwebhookconfigurations:        cert reconciler patches its own MWC
+
+  Role (release namespace only):
+    - secrets:                              cert reconciler manages its own
+                                            serving-cert Secret
+
+We do NOT grant access to pods or any other workload-related resource.
+Admission requests carry the Pod object inline; the webhook does not list
+pods from the API.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+  labels: {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["kube-resource-updater.io"]
+    resources: ["resourceoverrides"]
+    verbs: ["get", "list", "watch"]
+  {{- if .Values.webhook.status.enabled }}
+  # Status writer (`webhook.status.enabled: true`) PATCHes
+  # ResourceOverride.status.appliedToPodCount + lastAppliedAt every
+  # `webhook.status.flushIntervalSeconds`. Verb dropped when status writer
+  # is off — the running webhook never has the permission to escalate
+  # beyond what its own config allows.
+  - apiGroups: ["kube-resource-updater.io"]
+    resources: ["resourceoverrides/status"]
+    verbs: ["update", "patch"]
+  {{- end }}
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  {{- if .Values.webhook.autoRollout.enabled }}
+  # Auto-rollout (`webhook.autoRollout.enabled: true`) patches Deployment /
+  # StatefulSet / DaemonSet PodTemplate annotations after a ResourceOverride
+  # change so kubelet rolls the pods. `list` is required because the trigger
+  # walks the CR's namespace looking for workloads whose pod template labels
+  # match the selector (server-side label-selector lookup doesn't work against
+  # PodTemplate labels). `patch` is what actually stamps `restartedAt`.
+  # Verb dropped when auto-rollout is off.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "patch"]
+  {{- end }}
+  # MWC: list/watch must be cluster-wide (apiserver-side label selectors
+  # don't filter list operations by name; the cert reconciler needs to see
+  # its own object update events). get/patch/update only target the chart's
+  # OWN MutatingWebhookConfiguration via resourceNames so a compromise of
+  # the webhook ServiceAccount cannot modify other admission configs in
+  # the cluster.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    resourceNames: ["{{ include "kube-resource-updater.webhook.fullname" . }}"]
+    verbs: ["get", "patch", "update"]
+  {{- if .Values.webhook.validating.enabled }}
+  # VWC: same split — cluster-wide list/watch, narrow get/patch/update.
+  # Verb pair dropped entirely when validating webhook is off.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    resourceNames: ["{{ include "kube-resource-updater.webhook.fullname" . }}"]
+    verbs: ["get", "patch", "update"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+  labels: {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-resource-updater.webhook.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- /*
+Namespace-scoped Role for the cert reconciler's Secret operations. Scoping
+this to a Role (rather than ClusterRole) limits exposure to the release
+namespace — the webhook cannot read Secrets from other namespaces.
+
+IMPORTANT — list/watch scope caveat: k8s RBAC resourceNames restrictions
+apply only to get/update/patch/delete, NOT to list or watch. list and watch
+are always namespace-wide when granted via a Role; they cannot be narrowed
+to a single Secret name by design. `list` and `watch` are genuinely required
+by `_watch_secret_briefly` in webhook_cert.py (it watches the cert Secret for
+changes and rebuilds the in-process TLS context). The practical mitigation is
+to run the webhook in a dedicated namespace that contains only its own Secrets.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    # list/watch are namespace-wide — k8s RBAC cannot narrow these verbs via
+    # resourceNames. get/create/update/patch operate on specific Secrets only.
+    # Mitigation: deploy the webhook into a dedicated namespace with no other
+    # Secret-bearing workloads.
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-resource-updater.webhook.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

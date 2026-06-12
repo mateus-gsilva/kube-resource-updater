@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 256">
+  <!-- Concept A3 — horizontal lockup: tune hexagon + KRU wordmark + full name -->
+  <g>
+    <polygon points="128,24 218,76 218,180 128,232 38,180 38,76" fill="#326CE5"/>
+    <polygon points="128,40 204,84 204,172 128,216 52,172 52,84" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="4"/>
+    <g stroke-linecap="round">
+      <line x1="76" y1="95"  x2="180" y2="95"  stroke="#1E4DB7" stroke-width="10"/>
+      <line x1="76" y1="95"  x2="162" y2="95"  stroke="#FFFFFF" stroke-width="10"/>
+      <circle cx="162" cy="95" r="13" fill="#E6522C" stroke="#FFFFFF" stroke-width="5"/>
+      <line x1="76" y1="128" x2="180" y2="128" stroke="#1E4DB7" stroke-width="10"/>
+      <line x1="76" y1="128" x2="104" y2="128" stroke="#FFFFFF" stroke-width="10"/>
+      <circle cx="104" cy="128" r="13" fill="#E6522C" stroke="#FFFFFF" stroke-width="5"/>
+      <line x1="76" y1="161" x2="180" y2="161" stroke="#1E4DB7" stroke-width="10"/>
+      <line x1="76" y1="161" x2="138" y2="161" stroke="#FFFFFF" stroke-width="10"/>
+      <circle cx="138" cy="161" r="13" fill="#E6522C" stroke="#FFFFFF" stroke-width="5"/>
+    </g>
+  </g>
+  <text x="256" y="138" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="96" font-weight="800" letter-spacing="6"
+        fill="#326CE5">KRU</text>
+  <text x="258" y="182" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="30" font-weight="500" letter-spacing="1"
+        fill="#5B6B8C">kube-resource-updater</text>
+</svg>
