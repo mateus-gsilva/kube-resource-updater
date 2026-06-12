@@ -1,0 +1,58 @@
+{{- /*
+Required-config gate: fail `helm install/upgrade` when crWriteback.repoUrl or
+crWriteback.path is empty — but ONLY when the sync CronJob is enabled, since
+the CronJob is the component that writes ResourceOverride CRs to git. A
+webhook-only install (`cronjob.enabled: false`) never writes to git; it reads
+only log-level / skip-containers from this ConfigMap, so forcing crWriteback
+on it is a footgun (the documented standalone-webhook mode would fail to
+install). Defence-in-depth pair: the tool also re-validates these in
+Config.validate() at startup, but failing at template-render time gives the
+operator a clear, actionable error before any cluster state is touched.
+`branch` has a sane default ("main") in values.yaml so it isn't required here.
+*/}}
+{{- if .Values.cronjob.enabled }}
+{{- $_ := required "config.crWriteback.repoUrl is required when cronjob.enabled — the sync CronJob needs to know where to write ResourceOverride CRs (set it in values: config.crWriteback.repoUrl)." (((.Values.config | default dict).crWriteback | default dict).repoUrl | default "") }}
+{{- $_ := required "config.crWriteback.path is required when cronjob.enabled — the sync CronJob needs to know which directory in the repo to write ResourceOverride CRs to (set it in values: config.crWriteback.path)." (((.Values.config | default dict).crWriteback | default dict).path | default "") }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-resource-updater.fullname" . }}-config
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "kube-resource-updater.labels" . | nindent 4 }}
+  {{- with (include "kube-resource-updater.annotations" .) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+data:
+  config.yaml: |
+    config:
+      {{- .Values.config | toYaml | nindent 6 }}
+      {{/*
+       provider-agnostic supplemental keys (not under config:).
+      These come from the git: and gitlab: stanzas (not config:) so they must
+      be injected explicitly. The Python Config.from_file reader uses cfg.get()
+      with empty-string defaults for all three keys.
+
+        gitApiUrl     — API base URL override (git.apiUrl).
+        gitUsername   — canonical username key (git.username or fallback gitlab.username).
+        gitlabUsername — deprecated alias (gitlab.username); emitted only when set
+                         so existing ConfigMaps that already carry the key from a
+                         previous install continue to match what the operator expects.
+
+      config.gitProvider is NOT re-emitted here — it is already serialised as
+      part of `.Values.config | toYaml` above (it lives in config:, not git:).
+      */}}
+      {{- $gitApiUrl := .Values.git.apiUrl | default "" }}
+      {{- if $gitApiUrl }}
+      gitApiUrl: {{ $gitApiUrl | quote }}
+      {{- end }}
+      {{- $gitUsername := .Values.git.username | default "" }}
+      {{- if $gitUsername }}
+      gitUsername: {{ $gitUsername | quote }}
+      {{- end }}
+      {{- $gitlabUsername := .Values.gitlab.username | default "" }}
+      {{- if $gitlabUsername }}
+      gitlabUsername: {{ $gitlabUsername | quote }}
+      {{- end }}

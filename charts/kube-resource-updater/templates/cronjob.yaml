@@ -1,0 +1,206 @@
+{{- if .Values.cronjob.enabled -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "kube-resource-updater.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "kube-resource-updater.labels" . | nindent 4 }}
+  {{- with (include "kube-resource-updater.annotations" .) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  schedule: {{ .Values.cronjob.schedule | quote }}
+  {{- with .Values.cronjob.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  concurrencyPolicy: {{ .Values.cronjob.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit }}
+  {{- with .Values.cronjob.startingDeadlineSeconds }}
+  startingDeadlineSeconds: {{ . }}
+  {{- end }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.cronjob.backoffLimit }}
+      {{- with .Values.cronjob.ttlSecondsAfterFinished }}
+      ttlSecondsAfterFinished: {{ . }}
+      {{- end }}
+      {{- with .Values.cronjob.activeDeadlineSeconds }}
+      activeDeadlineSeconds: {{ . }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+            {{- include "kube-resource-updater.selectorLabels" . | nindent 12 }}
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with (merge (.Values.podAnnotations | default dict) (.Values.commonAnnotations | default dict)) }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          restartPolicy: {{ .Values.cronjob.restartPolicy }}
+          serviceAccountName: {{ include "kube-resource-updater.serviceAccountName" . }}
+          automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+          {{- include "kube-resource-updater.imagePullSecrets" . | nindent 10 }}
+          {{- include "kube-resource-updater.podSecurityContext" . | nindent 10 }}
+          {{- with .Values.priorityClassName }}
+          priorityClassName: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.schedulerName }}
+          schedulerName: {{ . | quote }}
+          {{- end }}
+          {{- with .Values.terminationGracePeriodSeconds }}
+          terminationGracePeriodSeconds: {{ . }}
+          {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- include "kube-resource-updater.affinity" . | nindent 10 }}
+          {{- with .Values.topologySpreadConstraints }}
+          topologySpreadConstraints:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.hostAliases }}
+          hostAliases:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.initContainers }}
+          initContainers:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: git-credentials
+              emptyDir:
+                medium: Memory
+            - name: config
+              configMap:
+                name: {{ include "kube-resource-updater.fullname" . }}-config
+            {{- with .Values.extraVolumes }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          containers:
+            - name: kube-resource-updater
+              image: {{ include "kube-resource-updater.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              {{- include "kube-resource-updater.containerSecurityContext" . | nindent 14 }}
+              {{- if .Values.diagnosticMode.enabled }}
+              command: {{- toYaml .Values.diagnosticMode.command | nindent 16 }}
+              args: {{- toYaml .Values.diagnosticMode.args | nindent 16 }}
+              {{- else }}
+              {{- with .Values.command }}
+              command: {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- with .Values.args }}
+              args: {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- end }}
+              env:
+                {{- /*
+                GIT_TOKEN is the canonical env var. The helper
+                kube-resource-updater.gitSecretName resolves the first non-empty
+                source: git.existingSecret → git.token → gitlab.existingSecret →
+                gitlab.token. GITLAB_TOKEN is no longer emitted — Python honors
+                it as a deprecated alias but the chart emits GIT_TOKEN so new
+                deployments use the canonical name from day 1.
+                */}}
+                {{- if or .Values.git.existingSecret .Values.git.token .Values.gitlab.existingSecret .Values.gitlab.token }}
+                - name: GIT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "kube-resource-updater.gitSecretName" . }}
+                      key: {{ include "kube-resource-updater.gitSecretKey" . }}
+                {{- end }}
+                {{- /*
+                GIT_PROVIDER informs the provider factory at startup. Empty string
+                means "auto-detect from repoUrl host" (the default). The ConfigMap
+                carries the same value; the env var wins when both are set (env
+                takes priority in Python's Config.from_env path).
+                */}}
+                - name: GIT_PROVIDER
+                  value: {{ .Values.config.gitProvider | default "" | quote }}
+                {{- with (.Values.git.apiUrl | default "") }}
+                - name: GIT_API_URL
+                  value: {{ . | quote }}
+                {{- end }}
+                {{- /*
+                GIT_USERNAME: canonical key (git.username). Falls back to
+                gitlab.username (deprecated alias) so legacy installs that set
+                only gitlab.username still get a non-empty username env var.
+                */}}
+                {{- $gitUsername := .Values.git.username | default "" }}
+                {{- $gitlabUsername := .Values.gitlab.username | default "" }}
+                {{- $resolvedUsername := $gitUsername | default $gitlabUsername }}
+                {{- if $resolvedUsername }}
+                - name: GIT_USERNAME
+                  value: {{ $resolvedUsername | quote }}
+                {{- end }}
+                - name: HOME
+                  value: /tmp/home
+                # OOM-aware. When true, slow-path
+                # detects OOMKilled events at sync time, bumps memory
+                # `pod.spec.limits × oomBumpFactor`, stamps per-container
+                # `oom-floor` / `oom-last-event` / `oom-boost-history`
+                # annotations on the CR, and respects the floor as a
+                # memory minimum on subsequent recommendations.
+                # The toggle env var is ALWAYS injected so the tool can
+                # tell the operator opted out (false short-circuits the
+                # whole OOM code path on the sync side). The dependent
+                # tuning vars (`OOM_BUMP_FACTOR` / `OOM_FLOOR_ENABLED`)
+                # are gated on `oomDetectionEnabled` so a disabled
+                # release doesn't ship dead configuration.
+                - name: OOM_DETECTION_ENABLED
+                  value: {{ .Values.config.oomDetectionEnabled | quote }}
+                {{- if .Values.config.oomDetectionEnabled }}
+                - name: OOM_BUMP_FACTOR
+                  value: {{ .Values.config.oomBumpFactor | quote }}
+                # `oomFloorEnabled` controls whether OOM bumps are sticky.
+                # False makes bumps one-shot (limit goes up this sync, but
+                # next sync's Prom-driven recommendation can drop it again).
+                # Per-workload override via annotation `kube-resource-updater.oomFloorEnabled`.
+                - name: OOM_FLOOR_ENABLED
+                  value: {{ .Values.config.oomFloorEnabled | default true | quote }}
+                {{- end }}
+                {{- with .Values.extraEnvVars }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+              {{- if or .Values.extraEnvVarsCM .Values.extraEnvVarsSecret }}
+              envFrom:
+                {{- with .Values.extraEnvVarsCM }}
+                - configMapRef:
+                    name: {{ . }}
+                {{- end }}
+                {{- with .Values.extraEnvVarsSecret }}
+                - secretRef:
+                    name: {{ . }}
+                {{- end }}
+              {{- end }}
+              {{- with .Values.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: git-credentials
+                  mountPath: /tmp/home
+                - name: config
+                  mountPath: /etc/kube-resource-updater
+                  readOnly: true
+                {{- with .Values.extraVolumeMounts }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+            {{- with .Values.sidecars }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+{{- end }}

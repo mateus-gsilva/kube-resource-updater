@@ -1,0 +1,18 @@
+{{- if and .Values.webhook.enabled .Values.webhook.podDisruptionBudget.enabled -}}
+{{- /*
+PDB for the webhook Deployment. Ensures node-drain operations cannot take all
+webhook replicas down simultaneously when failurePolicy is set to Fail (or when
+operators rely on the webhook for recommended values during a routine drain).
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels: {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.webhook.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "kube-resource-updater.webhook.selectorLabels" . | nindent 6 }}
+{{- end }}

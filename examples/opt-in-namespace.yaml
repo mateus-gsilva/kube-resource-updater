@@ -1,0 +1,58 @@
+# Opt a namespace into kube-resource-updater management.
+#
+# The CronJob discovers namespaces with this annotation and processes every
+# Deployment / StatefulSet inside. The admission webhook reads the same
+# annotation through a cached informer and short-circuits in non-opted-in
+# namespaces — pod admissions in unmanaged namespaces are free (single map
+# lookup, no patch path).
+#
+# All other annotation keys are optional; resolution order is workload >
+# namespace > helm default. Unknown keys log a warning at sync time.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-app
+  annotations:
+    # Required for the tool to manage anything in this namespace.
+    kube-resource-updater.enabled: "true"
+
+    # ── Optional overrides (drop the ones you don't need) ─────────────────
+
+    # Tighter percentile + window for a more bursty workload.
+    kube-resource-updater.cpuPercentile: "0.95"
+    kube-resource-updater.cpuRequestWindow: "7d"
+
+    # Different margins for this namespace.
+    kube-resource-updater.marginFraction: "0.30"
+
+    # Opt this namespace into auto-rollout — when a CR changes, the webhook
+    # stamps `kubectl.kubernetes.io/restartedAt` on the affected workload's
+    # PodTemplate, rolling its pods immediately. Cluster default is FALSE;
+    # operators choose namespaces deliberately.
+    kube-resource-updater.autoRollout: "true"
+
+    # Push CR changes direct to main (no MR review). Useful for namespaces
+    # that have GitLab auto-merge wired up, or for OOM-prone workloads where
+    # the review step adds unwanted latency.
+    kube-resource-updater.createMr: "false"
+
+    # Skip a sidecar container cluster-wide for this namespace.
+    kube-resource-updater.skipContainers: "istio-proxy"
+---
+# Per-workload override example. Same annotation prefix, different keys.
+# Workload values win over namespace; namespace wins over helm default.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: my-app
+  annotations:
+    # Workload-specific memory limit ceiling.
+    kube-resource-updater.maxMemoryLimitMi: "4096"
+    # OOM bumps are one-shot for this workload (limit goes up this sync, but
+    # next sync's Prom-driven recommendation can drop it again).
+    kube-resource-updater.oomFloorEnabled: "false"
+    # Workload-level autoRollout: this deployment rolls immediately on
+    # CR change even when the namespace defaults to "don't auto-roll".
+    kube-resource-updater.autoRollout: "true"
+spec: {}  # ... rest of your Deployment spec

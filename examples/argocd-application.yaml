@@ -1,0 +1,151 @@
+# Generic ArgoCD Application for kube-resource-updater.
+#
+# Two sources:
+#   1. Static manifests (image pull secret, GitLab token ExternalSecret if you
+#      use one, plus the per-namespace `ResourceOverride` CRs the sync CronJob
+#      writes back). `directory.recurse: true` picks up subdirectories so the
+#      tool-generated CRs apply without a separate Application.
+#   2. The Helm chart (pinned tag — bump `targetRevision` to upgrade).
+#
+# Replace the placeholders before applying:
+#   <YOUR_GITOPS_REPO>          the cluster's GitOps repo (where the
+#                               `ResourceOverride` CRs land).
+#   <YOUR_CHART_REPO>           where the kube-resource-updater chart is hosted.
+#   <CHART_VERSION>             pin a released tag (e.g. "1.20.0").
+#   <YOUR_REGISTRY>/...         your image registry (defaults to
+#                               the upstream-dev image; override for production).
+#   <YOUR_PROMETHEUS_URL>       reachable Prometheus URL; required 1.20.0.
+#   <YOUR_GITLAB_HOST>          GitLab instance the MRs target.
+#
+# After install: opt a namespace in with the annotation
+# `kube-resource-updater.enabled: "true"` (see examples/opt-in-namespace.yaml).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-resource-updater
+  namespace: argocd
+spec:
+  project: default
+
+  sources:
+    - repoURL: <YOUR_GITOPS_REPO>
+      targetRevision: HEAD
+      path: manifests/kube-resource-updater
+      directory:
+        recurse: true
+
+    - repoURL: <YOUR_CHART_REPO>
+      targetRevision: "<CHART_VERSION>"
+      path: .
+      helm:
+        releaseName: kube-resource-updater
+        values: |
+          image:
+            registry: docker.io
+            repository: <YOUR_REGISTRY>/kube-resource-updater
+            tag: "<CHART_VERSION>"
+            pullPolicy: IfNotPresent
+
+          config:
+            # required — helm install fails if empty.
+            prometheusUrl: "<YOUR_PROMETHEUS_URL>"
+            # Recommendation knobs (cluster-wide defaults; override per-namespace
+            # or per-workload via `kube-resource-updater.<key>` annotations).
+            cpuPercentile: "0.80"
+            memPercentile: "0.80"
+            cpuRequestWindow: "3d"
+            memRequestWindow: "3d"
+            marginFraction: "0.20"
+            # Floors so the tool doesn't recommend < 200m / 100Mi.
+            minCpuRequestM: "200"
+            minMemoryRequestMi: "100"
+            # OOM-aware (slow-path, default on). See ROADMAP / README.
+            oomDetectionEnabled: true
+            oomBumpFactor: "1.5"
+            # Open a Merge Request on every sync (operator reviews before apply).
+            # Flip to false for direct-push if you have GitLab auto-merge or
+            # don't need the human review step.
+            createMr: true
+            # CR write-back target — same gitops repo, same path the static
+            # manifests are read from above.
+            crWriteback:
+              repoUrl: "<YOUR_GITOPS_REPO>"
+              branch: "main"
+              path: "manifests/kube-resource-updater"
+            mr:
+              # Comma-separated GitLab usernames. Unknown names log a warning
+              # and are dropped (typo never blocks the MR).
+              reviewers: ""
+              labels: "kube-resource-updater,automated"
+              squash: true
+
+          gitlab:
+            # Either token (inline; rendered into a Secret this chart creates)
+            # OR existingSecret (you create + rotate the Secret out-of-band).
+            # If both are empty AND createMr=true, the chart's validate.yaml
+            # fails helm install (no token → 401 on MR open).
+            token: ""
+            existingSecret: kube-resource-updater-gitlab
+            existingSecretKey: token
+
+          cronjob:
+            enabled: true
+            schedule: "0 */6 * * *"
+            timeZone: "UTC"
+            concurrencyPolicy: Forbid
+            successfulJobsHistoryLimit: 3
+            failedJobsHistoryLimit: 1
+            activeDeadlineSeconds: 1800
+
+          webhook:
+            enabled: true
+            # Single replica is the recommended default — failurePolicy: Ignore
+            # absorbs admission downtime during pod restart. Bump to 2+ for HA.
+            replicaCount: 1
+            failurePolicy: Ignore
+            timeoutSeconds: 5
+            # Status writer stamps ResourceOverride.status.lastAppliedAt so
+            # `kubectl get ro -A` shows admission freshness as a printer column.
+            status:
+              enabled: true
+              flushIntervalSeconds: 30
+            # Auto-rollout: when a CR's resources change, stamp restartedAt on
+            # the workload so kubelet rolls the pods. Cluster-default OFF so
+            # operators opt in per namespace via
+            # `kube-resource-updater.autoRollout: "true"` annotation.
+            autoRollout:
+              enabled: true
+              debounceSeconds: 30
+            metrics:
+              serviceMonitor:
+                enabled: false  # flip on if you scrape with kube-prometheus-stack
+
+  destination:
+    name: in-cluster
+    # Own namespace — separates lifecycle from argocd itself. CreateNamespace
+    # in syncOptions creates it on first sync.
+    namespace: kube-resource-updater
+
+  # The webhook's caBundle on the MWC/VWC is patched at runtime by the
+  # in-process cert reconciler; the rendered chart ships an empty value.
+  # Without these ignores, ArgoCD flips Application to OutOfSync on every
+  # reconcile and selfHeal clobbers the live caBundle.
+  ignoreDifferences:
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      name: kube-resource-updater-webhook
+      jsonPointers:
+        - /webhooks/0/clientConfig/caBundle
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      name: kube-resource-updater-webhook
+      jsonPointers:
+        - /webhooks/0/clientConfig/caBundle
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

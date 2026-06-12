@@ -1,0 +1,7 @@
+# Dev-only tooling — not installed in the container image. Same bounded-range
+# convention as requirements.txt (floor + ceiling).
+#
+# pytest is a thin entrypoint: tests/test_qa_suite.py shells out to the
+# canonical suite at tools/qa_params.py (see CONTRIBUTING.md).
+pytest>=8.0.0,<9.0
+ruff>=0.6.0,<1.0

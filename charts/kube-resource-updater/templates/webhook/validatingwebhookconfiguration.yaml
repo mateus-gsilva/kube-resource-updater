@@ -1,0 +1,48 @@
+{{- if and .Values.webhook.enabled .Values.webhook.validating.enabled -}}
+{{- /*
+ValidatingWebhookConfiguration that wires kube-apiserver to this
+webhook's `/validate-resourceoverride` endpoint for CREATE / UPDATE
+on `kube-resource-updater.io/v1/resourceoverrides`. Rejects CRs whose
+selector could match the same pod as an existing CR AND that share a
+container name — the operator-actionable shape of "last write wins"
+that the mutating webhook resolves silently.
+
+caBundle is intentionally OMITTED from this template (same rationale as
+the MutatingWebhookConfiguration, ): omitting the field means
+no GitOps engine owns it via SSA, so the in-process cert reconciler's
+injected value persists through every sync without a fail-open window.
+If you supply webhook.caBundle, it is emitted here (and on the MWC).
+
+Failure mode: failurePolicy is hard-coded to Ignore. A webhook outage
+cannot block kubectl/ArgoCD from applying CRs; the worst case is "no
+overlap check runs", which degrades to the same behaviour the chart
+ships with `webhook.validating.enabled: false`.
+*/}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+  labels: {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+webhooks:
+  - name: resourceoverrides.kube-resource-updater.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups: ["kube-resource-updater.io"]
+        apiVersions: ["v1"]
+        resources: ["resourceoverrides"]
+        operations: ["CREATE", "UPDATE"]
+        scope: "Namespaced"
+    clientConfig:
+      {{- if .Values.webhook.caBundle }}
+      caBundle: {{ .Values.webhook.caBundle | quote }}
+      {{- end }}
+      service:
+        name: {{ include "kube-resource-updater.webhook.fullname" . }}
+        namespace: {{ .Release.Namespace }}
+        port: 443
+        path: /validate-resourceoverride
+{{- end }}

@@ -1,0 +1,29 @@
+{{- if and .Values.webhook.enabled .Values.webhook.metrics.serviceMonitor.enabled -}}
+{{- /*
+ServiceMonitor for the webhook's /metrics endpoint (kube-prometheus-stack).
+Only created when both webhook and serviceMonitor are enabled — gating both flags
+keeps the chart usable in clusters without prometheus-operator installed.
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "kube-resource-updater.webhook.fullname" . }}
+  namespace: {{ default .Release.Namespace .Values.webhook.metrics.serviceMonitor.namespace | quote }}
+  labels:
+    {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+    {{- with .Values.webhook.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  endpoints:
+    - port: http-metrics
+      interval: {{ .Values.webhook.metrics.serviceMonitor.interval }}
+      path: /metrics
+      scheme: http
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "kube-resource-updater.webhook.selectorLabels" . | nindent 6 }}
+{{- end }}

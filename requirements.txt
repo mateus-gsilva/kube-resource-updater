@@ -1,0 +1,20 @@
+# Human-edited INTENT file: loose floor + an upper bound on every dep so a
+# future build can't silently jump to an untested breaking major (#33). The
+# exact resolved versions the image installs live in the generated
+# `requirements.lock` — regenerate it (command in its header) after editing.
+#
+# Upper bound: kubernetes==36.0.0 ships an in-cluster auth regression
+# (https://github.com/kubernetes-client/python — 36.0 release) where
+# `Configuration.auth_settings()` returns an empty dict after
+# `load_incluster_config()`, so the Authorization header is never sent
+# and every API call gets 401. Pin <36 until 36.0.1+ is verified.
+kubernetes>=29.0.0,<36
+ruamel.yaml>=0.18.0,<1.0
+requests>=2.31.0,<3.0
+# aiohttp powers the mutation webhook server (src/webhook_server.py).
+# Used only by `python main.py webhook`; the sync CronJob does not import it.
+aiohttp>=3.9.0,<4.0
+# cryptography backs the in-process cert reconciler (src/webhook_cert.py).
+# Drop-in for cert-manager — webhook generates and rotates its own serving cert.
+# Used only by `python main.py webhook`.
+cryptography>=42.0.0,<50.0

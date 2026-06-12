@@ -1,0 +1,80 @@
+name: Release
+
+# Versioned release scheme. Create a GitHub Release (tag e.g. `v0.1.0`) and this
+# publishes the matching image + chart to GHCR. `workflow_dispatch` allows a
+# manual run for a given version without cutting a Release.
+#
+# Outputs:
+#   - ghcr.io/mateus-gsilva/kube-resource-updater:<version>  (+ :latest)
+#   - oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater:<chart version>
+#
+# NOTE: a freshly-created GHCR package is private by default. Make the
+# `kube-resource-updater` (image) and `charts/kube-resource-updater` (chart)
+# packages public once, in their GitHub package settings, for anonymous
+# `docker pull` / `helm pull` and Artifact Hub to reach them.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 0.1.0). Defaults to Chart.yaml appVersion."
+        required: false
+
+permissions:
+  contents: write   # upload the packaged chart to the GitHub Release
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.release.tag_name }}" ]; then
+            V="${{ github.event.release.tag_name }}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            V="${{ inputs.version }}"
+          else
+            V=$(awk '/^appVersion:/{gsub(/"/,"",$2); print $2}' charts/kube-resource-updater/Chart.yaml)
+          fi
+          echo "version=${V#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/mateus-gsilva/kube-resource-updater:${{ steps.ver.outputs.version }}
+            ghcr.io/mateus-gsilva/kube-resource-updater:latest
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: azure/setup-helm@v4
+
+      - name: Package + push chart to GHCR (OCI)
+        run: |
+          helm dependency build charts/kube-resource-updater
+          helm package charts/kube-resource-updater --destination /tmp/chart
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          helm push /tmp/chart/kube-resource-updater-*.tgz oci://ghcr.io/mateus-gsilva/charts
+
+      - name: Attach packaged chart to the GitHub Release
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" /tmp/chart/kube-resource-updater-*.tgz

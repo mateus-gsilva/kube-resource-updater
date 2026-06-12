@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- KRU icon — k8s hexagon + resource sliders + vector "KRU" (no <text>: font-independent) -->
+  <polygon points="128,24 218,76 218,180 128,232 38,180 38,76" fill="#326CE5"/>
+  <g stroke-linecap="round">
+    <!-- slider 1: high -->
+    <line x1="76" y1="84"  x2="180" y2="84"  stroke="#1E4DB7" stroke-width="10"/>
+    <line x1="76" y1="84"  x2="160" y2="84"  stroke="#FFFFFF" stroke-width="10"/>
+    <circle cx="160" cy="84" r="13" fill="#E6522C" stroke="#FFFFFF" stroke-width="5"/>
+    <!-- slider 2: low -->
+    <line x1="76" y1="114" x2="180" y2="114" stroke="#1E4DB7" stroke-width="10"/>
+    <line x1="76" y1="114" x2="102" y2="114" stroke="#FFFFFF" stroke-width="10"/>
+    <circle cx="102" cy="114" r="13" fill="#E6522C" stroke="#FFFFFF" stroke-width="5"/>
+  </g>
+  <!-- KRU — geometric letterforms, stroke-built -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <!-- K -->
+    <path d="M 72 146 V 186"/>
+    <path d="M 74 168 L 94 146"/>
+    <path d="M 74 168 L 94 186"/>
+    <!-- R -->
+    <path d="M 112 146 V 186"/>
+    <path d="M 112 148 h 12 a 10 10 0 0 1 0 20 h -12"/>
+    <path d="M 126 168 L 136 186"/>
+    <!-- U -->
+    <path d="M 154 146 v 24 a 14 14 0 0 0 28 0 v -24"/>
+  </g>
+</svg>

@@ -1,0 +1,9 @@
+# Artifact Hub repository metadata.
+# Pushed to the chart's OCI path under the `artifacthub.io` tag by
+# .github/workflows/artifacthub-metadata.yml, which lets Artifact Hub verify
+# ownership of oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater
+# (the "Verified Publisher" badge).
+repositoryID: a86cb8e3-a2a2-4e1e-9daa-8f35c0a84376
+owners:
+  - name: Mateus Silva
+    email: mateus.gsilva95@gmail.com
