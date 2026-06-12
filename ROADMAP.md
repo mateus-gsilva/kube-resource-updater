@@ -14,7 +14,7 @@ reference: [docs/reference.md](docs/reference.md).
 | | Item |
 |---|---|
 | ⛔ | **GitHub PR support — live validation.** The `GitHubProvider` (pull-request creation, adoption on 422, reviewer requests) is implemented and mock-tested, but has not yet opened a PR against a real GitHub repo. Until that happens, treat GitHub write-back as alpha. GitHub assignees are accepted but ignored (TODO in `src/git_provider.py`). |
-| 🟡 | **Image private / chart not on a registry.** CI builds and publishes the image to GHCR (`ghcr.io/mateus-gsilva/kube-resource-updater`) on every release, and the chart default points at it — but the package is private while the repo is private, so public installs must build from the `Dockerfile` and override `image.*` until then. The chart still installs from this repo (no public chart registry yet); ArtifactHub listing is planned. |
+| 🟡 | **Artifact Hub listing.** The image and the chart are published to GHCR on every release (`ghcr.io/mateus-gsilva/kube-resource-updater` + `oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater`, both public), and the chart default points at the image. What remains is registering the OCI chart repo on [artifacthub.io](https://artifacthub.io) (manual, web) and pushing an `artifacthub-repo.yml` for the verified-publisher badge. |
 | 🔴 | **Integration test suite.** [`TEST_PLAN.md`](TEST_PLAN.md) documents a 7-phase kind-cluster plan (scenarios, failure injection, scale, CRD enforcement, upgrade path). The offline QA suite (~1,250 asserts) is comprehensive at the unit/render layer; the cluster-based phases are not yet automated. |
 
 ## Planned features

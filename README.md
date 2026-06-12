@@ -33,19 +33,19 @@ VPA's auto-applying recommendations are reviewable only after the fact (pod was 
 
 ## Quick start
 
-1. **Install the chart** in its own namespace (it manages its own RBAC + CRD + webhook certs). The chart lives in this repo under [`charts/kube-resource-updater`](charts/kube-resource-updater/); a published chart registry is pending — install from a clone for now. The default `image.repository` is `ghcr.io/mateus-gsilva/kube-resource-updater` (published by CI), but the package is private while this repo is private — so for now build the image from the [`Dockerfile`](Dockerfile) and override `image.*` with a registry you can pull from.
+1. **Install the chart** straight from GHCR in its own namespace (it manages its own RBAC + CRD + webhook certs). The default `image.repository` already points at the published image — no image override needed.
 
 ```bash
-git clone https://github.com/mateus-gsilva/kube-resource-updater.git
-cd kube-resource-updater
-helm dependency build charts/kube-resource-updater
-helm install kube-resource-updater charts/kube-resource-updater \
+helm install kube-resource-updater \
+  oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater --version 0.1.0 \
   --namespace kube-resource-updater --create-namespace \
   --set config.prometheusUrl=http://prometheus-operated.monitoring.svc.cluster.local:9090 \
   --set git.token=$GIT_TOKEN \
   --set config.crWriteback.repoUrl=https://gitlab.example.com/infra/cluster-gitops.git \
   --set config.crWriteback.path=manifests/kube-resource-updater
 ```
+
+   Image: `ghcr.io/mateus-gsilva/kube-resource-updater` · Chart: `oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater`. Both are public on GHCR.
 
 2. **Opt a namespace in** by annotation:
 
@@ -133,9 +133,7 @@ process, and the code-style expectations (PEP 604 type hints, comment
 
 ## License
 
-[Apache License 2.0](LICENSE). Actively developed. CI publishes the container
-image to GHCR, but the package stays private while this repo is private; the
-chart is not on a public chart registry yet. Until both are public, build the
-image yourself and install the chart from this repo (see
-[Quick start](#quick-start)). [ROADMAP.md](ROADMAP.md) tracks the remaining
-publication items.
+[Apache License 2.0](LICENSE). Actively developed. The image and the Helm chart
+are published to GHCR on every release (see [Quick start](#quick-start)); an
+Artifact Hub listing is planned. [ROADMAP.md](ROADMAP.md) tracks the remaining
+items.

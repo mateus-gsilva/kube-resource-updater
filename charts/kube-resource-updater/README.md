@@ -13,17 +13,13 @@ Helm chart for the [kube-resource-updater](https://github.com/mateus-gsilva/kube
 
 ## Install
 
-The chart is not yet published to a public registry — install it from this
-repo. The default `image.repository` is `ghcr.io/mateus-gsilva/kube-resource-updater`
-(published by CI), but the package is private while the repo is private — so
-build the image from the repo's [`Dockerfile`](../../Dockerfile) and override
-`image.*` with a registry you can pull from.
+The chart is published to GHCR as an OCI artifact. The default
+`image.repository` already points at the published image, so no image override
+is needed.
 
 ```bash
-git clone https://github.com/mateus-gsilva/kube-resource-updater.git
-cd kube-resource-updater
-helm dependency build charts/kube-resource-updater
-helm install kube-resource-updater charts/kube-resource-updater \
+helm install kube-resource-updater \
+  oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater --version 0.1.0 \
   --namespace kube-resource-updater --create-namespace \
   --values my-values.yaml
 ```
