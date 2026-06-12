@@ -1,7 +1,6 @@
 """Kubernetes API helpers — local cluster only.
 
-The Prometheus URL is configured explicitly via `config.prometheusUrl` since
-chart 1.20.0 — the previous auto-discovery (Service DNS + Prometheus CR
+The Prometheus URL is configured explicitly via `config.prometheusUrl` — the previous auto-discovery (Service DNS + Prometheus CR
 fallback) was removed. Two reasons:
 
   - Operators outside the kube-prometheus-stack convention (Prometheus in

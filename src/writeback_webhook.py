@@ -111,7 +111,7 @@ class WebhookEntry:
     oom_annotations: dict[str, str] = field(default_factory=dict)
     # Routing decision resolved per workload through the helm < ns < workload
     # hierarchy. True → this entry's diff opens (or updates) a Merge Request.
-    # False → push direct to the target branch. Chart 1.13.0: previously
+    # False → push direct to the target branch. previously
     # `cmd_sync` ignored `eff.create_mr` and used the global flag for every
     # workload. With per-entry routing, a single sync can produce two
     # parallel pushes (one direct, one MR) per repo.
@@ -154,7 +154,7 @@ def write_back_webhook_all(
     bucket (direct push vs MR) based on the entry's per-workload `create_mr`.
 
     `oom_state_lookup` / `oom_events_lookup` / `oom_eligibility_lookup`
-    feed the slow-path OOM-aware bump (chart 1.11.0). All three default
+    feed the slow-path OOM-aware bump. All three default
     to empty/None when the feature is disabled cluster-wide; the build
     pipeline handles missing state gracefully (no bump, no annotation
     churn).
@@ -241,7 +241,7 @@ def _build_entries(
     effective Config has both grow_only and shrink_only set — a logic conflict
     that would produce no value changes regardless. Here we trust the input.
 
-    OOM-aware (chart 1.11.0):
+    OOM-aware:
       - `oom_state_lookup`: live state per CR from apiserver (`fetch_oom_state`).
       - `oom_events_lookup`: detected OOMKilled events per `(ns, workload, container)`.
       - `oom_eligibility_lookup`: per-`(ns, workload)` boolean (helm < ns < workload).
@@ -288,7 +288,7 @@ def _build_entries(
             if wl_key in collision_keys
             else rec.target_name
         )
-        # Audit v2 finding D12: k8s name limit is 63 chars per RFC 1123.
+        # k8s name limit is 63 chars per RFC 1123.
         # Without a guard, `kubectl apply -f <cr.yaml>` rejects the CR
         # with "invalid metadata.name: must be no more than 63
         # characters". The collision-prefix path (`deployment-<name>`
@@ -496,13 +496,13 @@ def _filter_skipped_containers(
     return kept, dropped
 
 
-# Per-container OOM annotation prefixes (chart 1.11.0). Each container
+# Per-container OOM annotation prefixes. Each container
 # gets its OWN annotation per concept — `oom-floor.<container>`,
 # `oom-last-event.<container>`, `oom-boost-history.<container>`.
 # Operators get one line per concept per container in `kubectl describe`,
 # and `kubectl get -o jsonpath='{...oom-floor.web}'` is a direct lookup.
 #
-# Migration: chart 1.10.0 used a single CSV-format key per concept
+# Migration:  used a single CSV-format key per concept
 # (`oom-floor: "web=900Mi,cache=64Mi"`). The parsers below read both
 # formats; renderers always emit the new per-container shape, so legacy
 # CSVs migrate organically on the first sync after upgrade.
@@ -518,7 +518,7 @@ OOM_BOOST_HISTORY_PREFIX = "kube-resource-updater.io/oom-boost-history."
 # clears floor / last-event / history).
 OOM_INVESTIGATION_PREFIX = "kube-resource-updater.io/oom-investigation-required."
 
-# Legacy single-key forms (chart 1.10.0 — read on migration only).
+# Legacy single-key forms.
 _LEGACY_OOM_FLOOR_KEY = "kube-resource-updater.io/oom-floor"
 _LEGACY_OOM_LAST_EVENT_KEY = "kube-resource-updater.io/oom-last-event"
 _LEGACY_OOM_BOOST_HISTORY_KEY = "kube-resource-updater.io/oom-boost-history"
@@ -553,7 +553,7 @@ def _is_oom_annotation(key: str) -> bool:
 def _format_oom_boost_entry(boost: dict) -> str:
     """One history line for ONE container: `<RFC3339Z> <from>→<to> (×<factor>)`.
 
-    Per-container annotations (chart 1.11.0+) keep history per container,
+    Per-container annotations keep history per container,
     so each entry is a single container's bump. Caller assembles full
     multi-line history via `_build_oom_boost_history`.
     """
@@ -562,7 +562,7 @@ def _format_oom_boost_entry(boost: dict) -> str:
 
 
 def _parse_legacy_csv(annotation_value: str, value_parser=lambda v: v) -> dict[str, str]:
-    """Parse the chart 1.10.0 single-key CSV format `c=v,c=v` to a dict.
+    """Parse the  single-key CSV format `c=v,c=v` to a dict.
 
     `value_parser` lets callers convert values during parse (e.g. memory
     quantity → bytes). On any per-entry failure, the entry is dropped.
@@ -592,8 +592,7 @@ def parse_oom_floors_from_annotations(annotations: dict[str, str] | None) -> dic
     """Read OOM floor entries from a CR's annotations dict.
 
     Returns `{container: bytes}`. Reads BOTH the per-container prefix
-    format (chart 1.11.0+) AND the single-key CSV format (chart 1.10.0
-    legacy). Per-container entries take precedence on collision.
+    format AND the single-key CSV format. Per-container entries take precedence on collision.
     Malformed entries are skipped silently.
     """
     if not annotations:
@@ -833,7 +832,7 @@ def _build_containers_payload(
         rc=rc,
     )
 
-    # Audit v2 finding D6: `Config.validate` only checks the HELM-LEVEL
+    # `Config.validate` only checks the HELM-LEVEL
     # min/max bounds at startup. The per-workload resolver merge
     # (helm < ns < workload) can produce an effective config where
     # `min > max` for the same dimension — the silent-clamping order in
@@ -870,7 +869,7 @@ def _build_containers_payload(
     # patching). Operator-surprising: they wanted "ignore container X"
     # but got "stop managing this workload entirely" — that's what
     # `skip: "true"` is for. Warn so it's discoverable without
-    # `kubectl get ro -A` diffing. (Audit v2 finding A8.)
+    # `kubectl get ro -A` diffing.
     if not kept and dropped:
         _log.warning(
             "  [skip-containers] %s/%s: ALL containers (%s) filtered by "
@@ -887,7 +886,7 @@ def _build_containers_payload(
     prior_investigation: dict[str, bool] = (oom_state or {}).get("investigation") or {}
     events: dict[str, OomEvent] = oom_events or {}
 
-    # One-shot reset (chart 1.12.0): operator marked the workload/ns
+    # One-shot reset: operator marked the workload/ns
     # with `kube-resource-updater.oomFloorReset: "true"` to drop sticky
     # state from previous OOMs. Zero out the prior maps so this sync
     # writes a CR with no `oom-*` annotations and any fresh OOM event
@@ -954,13 +953,12 @@ def _build_containers_payload(
                 "limits": {"cpu": f"{cpu_cap_m}m", "memory": _fmt_memory(str(mem_lim_b))},
             }
 
-        # ── OPERATION ORDER (chart 1.14.0) ────────────────────────────────
+        # ── OPERATION ORDER ────────────────────────────────
         # 1. Initial floors/ceilings already applied inside _build_container_resources.
         # 2. OOM bump if fresh event (computes desired lim/req; may be reverted
         #    by grow/shrink below — that's intentional, operator policy wins).
-        # 3. Sticky OOM floor from prior bumps (chart 1.11.0).
-        # 4. grow/shrink vs apiserver-source old_res (chart 1.14.0 — was a no-op
-        #    before this release; operator policy is now absolute).
+        # 3. Sticky OOM floor from prior bumps.
+        # 4. grow/shrink vs apiserver-source old_res.
         # 5. Final floors/ceilings pass (hard invariants always win over policy).
         # 6. Detect "bump was reverted by policy": don't update oom_floor
         #    annotation, advance last_event for dedupe, log clear warning.
@@ -1149,8 +1147,7 @@ def _build_containers_payload(
     #     The prior carry-forward was designed to survive Prom misses,
     #     not permanent container removal. Without this drop, an
     #     `oom-floor.<old-container>` annotation lingers forever
-    #     after a rename — confuses `kubectl describe ro`. (Audit v2
-    #     finding C3.)
+    #     after a rename — confuses `kubectl describe ro`.
     oom_annotations: dict[str, str] = {}
     rendered_names = {p["name"] for p in payload}
     current_container_names = {c.container_name for c in rec.containers}
@@ -1700,7 +1697,7 @@ def _commit_repo(
     for the MR (when any entry has `create_mr=True`). Empty list when nothing
     changed for either bucket.
 
-    Bucketing details (chart 1.13.0): the hierarchy helm < ns < workload is
+    Bucketing details: the hierarchy helm < ns < workload is
     resolved per entry by the caller (`_build_entries`), so this function
     just trusts `entry.create_mr`. The two passes share a single clone and a
     single `_read_old_docs` snapshot — the second pass uses `git pull` to
@@ -1722,7 +1719,7 @@ def _commit_repo(
     # repo, build the diff, and crash mid-flight with a 401 from the
     # GitLab MR-open call. Failing here — before any git I/O — gives
     # the operator a single clear error and preserves the same exit
-    # code as the validate.yaml render-time check. (Audit v2 finding A5.)
+    # code as the validate.yaml render-time check.
     if mr_entries and not provider.has_credentials():
         ns_list = sorted({e.namespace for e in mr_entries})
         wl_list = sorted({f"{e.namespace}/{e.cr_name}" for e in mr_entries})
@@ -1785,7 +1782,7 @@ def _commit_repo(
                     # Blank between the per-namespace trees and this
                     # commit-summary line (mirrors the MR path below).
                     _log.info("")
-                    # `[push]` tag (chart 1.19.1) — was `[OK] webhook: ...`
+                    # `[push]` tag — was `[OK] webhook: ...`
                     # before; semantically `[OK]` belongs to per-namespace
                     # CR-file ACK, while this line reports the per-repo
                     # commit result. `[push]` mirrors `[mr]` on the
@@ -1877,7 +1874,7 @@ def _commit_repo(
                         project_path=_project_path_from_url(repo_url),
                     )
                     ns_list = sorted({e.namespace for e in mr_entries})
-                    # `[mr] opened` (chart 1.19.1) — was `[OK] webhook: MR
+                    # `[mr] opened` — was `[OK] webhook: MR
                     # opened ...` before. `[OK]` is reserved for per-ns CR
                     # file ACK; this line is the per-repo MR result and
                     # belongs to the same `[mr]` family as the metadata

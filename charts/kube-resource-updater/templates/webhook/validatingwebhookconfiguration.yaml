@@ -8,7 +8,7 @@ container name — the operator-actionable shape of "last write wins"
 that the mutating webhook resolves silently.
 
 caBundle is intentionally OMITTED from this template (same rationale as
-the MutatingWebhookConfiguration, ROADMAP #58): omitting the field means
+the MutatingWebhookConfiguration, ): omitting the field means
 no GitOps engine owns it via SSA, so the in-process cert reconciler's
 injected value persists through every sync without a fail-open window.
 If you supply webhook.caBundle, it is emitted here (and on the MWC).

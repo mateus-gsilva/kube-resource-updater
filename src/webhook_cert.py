@@ -419,8 +419,7 @@ class CertReconciler:
             if exc.status != 404:
                 raise
         # 404 from REPLACE means the Secret doesn't exist yet. Try CREATE.
-        # Audit v2 finding D13: in multi-replica setups (chart 1.21.0+
-        # validates PDB requires replicaCount>=2), all replicas race to
+        # in multi-replica setups, all replicas race to
         # CREATE on first cold-start. One wins with 201, the others get
         # 409 AlreadyExists. Pre-1.21.0 the 409 propagated up and the
         # losing replica's reconciler thread crashed; pod liveness

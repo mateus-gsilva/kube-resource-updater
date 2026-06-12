@@ -20,7 +20,7 @@ contradictory toggle combo.
 {{- end }}
 
 {{- /*
-createMr + token consistency (chart 1.20.0). The CronJob opens GitLab
+createMr + token consistency. The CronJob opens GitLab
 MRs when `config.createMr: true`; that path needs a GITLAB_TOKEN, which
 the chart sources from `gitlab.token` (inline) OR `gitlab.existingSecret`
 (operator-managed). With neither set the sync runs, talks to Prometheus,
@@ -35,7 +35,7 @@ already carries. The runtime `Config.validate` in src/config.py
 mirrors this rule for hand-edited ConfigMap drift.
 */}}
 {{- /*
-createMr + token consistency — generalised for provider-agnostic config (Phase 3).
+createMr + token consistency — generalised for provider-agnostic config.
 Check all four token sources: git.token, git.existingSecret (new path) and
 gitlab.token, gitlab.existingSecret (deprecated aliases). A token from any one
 source is sufficient. When all four are empty with createMr=true, the sync would
@@ -46,7 +46,7 @@ run, build the diff, push the branch, then crash on MR-open with a 401.
 {{- end }}
 
 {{- /*
-prometheusUrl required (chart 1.20.0). Auto-discovery was dropped — the
+prometheusUrl required. Auto-discovery was dropped — the
 tool needs an explicit Prometheus URL to query for usage data. Failing
 at render time gives the operator a clear missing-config error before
 any cluster state is touched. Runtime `Config.validate` mirrors this
@@ -58,11 +58,11 @@ Skip the check when `cronjob.enabled: false` — webhook-only installs
 don't need a URL.
 */}}
 {{- if and .Values.cronjob.enabled (not (.Values.config.prometheusUrl | default "")) }}
-{{- fail "config.prometheusUrl is empty — required since chart 1.20.0 (auto-discovery was removed). Set it to a reachable Prometheus URL, e.g. http://prometheus-operated.monitoring.svc.cluster.local:9090 for kube-prometheus-stack." }}
+{{- fail "config.prometheusUrl is empty — required (auto-discovery was removed). Set it to a reachable Prometheus URL, e.g. http://prometheus-operated.monitoring.svc.cluster.local:9090 for kube-prometheus-stack." }}
 {{- end }}
 
 {{- /*
-config.gitProvider validation (Phase 3). Allowed values: "" (empty = auto-detect),
+config.gitProvider validation. Allowed values: "" (empty = auto-detect),
 "auto", "gitlab", "github". An unrecognized value silently uses the auto-detection
 fallback at runtime, hiding a likely typo from the operator.
 */}}
@@ -72,7 +72,7 @@ fallback at runtime, hiding a likely typo from the operator.
 {{- end }}
 
 {{- /*
-Leading-slash crWriteback.path (chart 1.21.0, audit v2 finding D11):
+Leading-slash crWriteback.path:
 os.path.join(repo_dir, absolute_path) returns absolute_path — the
 tool would try to write to /<path>/... on the container filesystem
 instead of into the cloned repo. Reject at install time.
@@ -179,7 +179,7 @@ an invalid value (`logLevel: "BANANA"`) was silently coerced to INFO by
 {{- end }}
 
 {{- /*
-Min > max bounds at helm-install time (chart 1.21.0). Per-workload
+Min > max bounds at helm-install time. Per-workload
 annotation merge can still produce min > max at runtime (caught by
 `_build_containers_payload` with a per-workload skip + warning), but
 catching the helm-level case here gives the operator a single clear
@@ -200,7 +200,7 @@ this for hand-edited ConfigMap drift.
 {{- end }}
 
 {{- /*
-gitlab.token AND gitlab.existingSecret both set (chart 1.21.0). The
+gitlab.token AND gitlab.existingSecret both set. The
 `gitlabSecretName` helper picks `existingSecret` first, so a hand-set
 `token` becomes dead config. Operators who later opt into existingSecret
 but forget to remove the inline token leak the unused value through
@@ -261,8 +261,8 @@ operator to think about it.
 {{- end }}
 
 {{- /*
-Zero-component duration windows at helm-install time (chart 1.21.0,
-audit v2 finding B3). The Prom-duration regex accepts `0s`/`0h`/etc
+Zero-component duration windows at helm-install time. The Prom-duration
+regex accepts `0s`/`0h`/etc
 syntactically; runtime `Config.validate` rejects them; we mirror here.
 */}}
 {{- range $name, $val := dict

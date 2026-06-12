@@ -34,7 +34,7 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets"]
     verbs: ["get", "list"]
-  # CronJob discovery (chart 1.22.16). The sync loop calls
+  # CronJob discovery. The sync loop calls
   # list_namespaced_cron_job to rightsize CronJob pod templates via the CR.
   # No `watch` — CronJob is a batch process that lists at sync time, same
   # pattern as `apps` above. Standalone `jobs` is intentionally excluded:
@@ -44,7 +44,7 @@ rules:
     resources: ["cronjobs"]
     verbs: ["get", "list"]
   {{- if .Values.config.oomDetectionEnabled }}
-  # OOM-aware (chart 1.11.0). Slow-path lists pods at sync time to scan
+  # OOM-aware. Slow-path lists pods at sync time to scan
   # `containerStatuses[*].lastState.terminated.reason == "OOMKilled"`
   # events on opted-in workloads. Pods listed namespace-scoped (only
   # opted-in namespaces are checked); `list` cluster-wide is the
@@ -63,8 +63,7 @@ rules:
   {{- end }}
   {{- /*
   Discovery-mode reads (endpoints in `default`, services + Prometheus CR
-  in `monitoring`) moved to namespace-scoped Roles in `templates/discovery-rbac.yaml`
-  in chart 1.20.0. Pre-1.20.0 they were granted cluster-wide here; the
+  in `monitoring`) moved to namespace-scoped Roles in `templates/discovery-rbac.yaml` Pre-1.20.0 they were granted cluster-wide here; the
   tightened layout drops three cluster-wide read grants for operators who
   use discovery (the dominant install sets `prometheusUrl` explicitly and
   rendered no extra rules either way).

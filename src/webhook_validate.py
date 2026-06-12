@@ -156,7 +156,7 @@ def validate(
     #     end up in etcd but never patch anything. Operator-surprising:
     #     `kubectl apply` succeeds, `kubectl get ro` shows the CR, but no
     #     pod ever gets patched. Reject at admission for immediate,
-    #     actionable feedback. (Audit v2 finding D5.)
+    #     actionable feedback.
     spec = (obj.get("spec") or {})
     selector = spec.get("selector") or {}
     match_labels = selector.get("matchLabels") or {}

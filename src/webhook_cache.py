@@ -89,8 +89,7 @@ class ResourceOverride:
         local change to this method.
 
         Empty selector → no-match (NOT match-everything). The vacuous truth
-        path of `for ... in {}: return True` was a real bug
-        (docs/config-interactions-audit-v2.md, finding D5): a hand-edited CR with `matchLabels: {}` would have
+        path of `for ... in {}: return True` was a real bug: a hand-edited CR with `matchLabels: {}` would have
         the cache return True for every pod in the namespace and the
         mutation webhook patch every pod's resources to the CR's values.
         The validating webhook's `_selectors_can_overlap` ALREADY treats

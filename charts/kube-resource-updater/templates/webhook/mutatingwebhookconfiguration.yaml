@@ -8,7 +8,7 @@ in-process cert reconciler (src/webhook_cert.py) injects the real CA bundle
 via replace_mutating_webhook_configuration on startup and on drift. Because
 this template never emits caBundle, no GitOps engine (ArgoCD SSA, Flux,
 kubectl apply --server-side) ever owns the field — the reconciler's value
-persists through every sync without a fail-open window (ROADMAP #58). The
+persists through every sync without a fail-open window. The
 older approach rendered `caBundle: ""`, which let argocd-controller own the
 field and zero it on every sync, reopening a brief fail-open gap each time.
 

@@ -153,7 +153,7 @@ spec:
             - name: WEBHOOK_VWC
               value: {{ include "kube-resource-updater.webhook.fullname" . | quote }}
             {{- end }}
-            # ROADMAP #31 (chart 1.22.11) — clusterDomain plumbed through so the
+            # — clusterDomain plumbed through so the
             # webhook cert SAN matches the apiserver-dialed DNS suffix on
             # clusters with custom clusterDomain (e.g. `cluster.foo.com`).
             # Default `cluster.local` keeps every existing deployment working.

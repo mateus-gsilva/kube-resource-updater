@@ -30,7 +30,7 @@ data:
     config:
       {{- .Values.config | toYaml | nindent 6 }}
       {{/*
-      Phase 3 provider-agnostic supplemental keys (not under config:).
+       provider-agnostic supplemental keys (not under config:).
       These come from the git: and gitlab: stanzas (not config:) so they must
       be injected explicitly. The Python Config.from_file reader uses cfg.get()
       with empty-string defaults for all three keys.

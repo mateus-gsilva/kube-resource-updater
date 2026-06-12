@@ -37,7 +37,7 @@ VPA's auto-applying recommendations are reviewable only after the fact (pod was 
 
 ```bash
 helm install kube-resource-updater \
-  oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater --version 0.1.0 \
+  oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater --version 0.1.1 \
   --namespace kube-resource-updater --create-namespace \
   --set config.prometheusUrl=http://prometheus-operated.monitoring.svc.cluster.local:9090 \
   --set git.token=$GIT_TOKEN \
@@ -119,7 +119,7 @@ python3 tools/qa_params.py
 ## Documentation
 
 - [`docs/reference.md`](docs/reference.md) — full reference: annotations, config keys, Prometheus queries, RBAC, helm values.
-- [`docs/webhook-migration.md`](docs/webhook-migration.md) — strategic design doc for the webhook + CRD architecture.
+- [`docs/webhook-migration.md`](docs/webhook-migration.md) — design doc for the webhook + CRD architecture.
 - [`charts/kube-resource-updater/README.md`](charts/kube-resource-updater/README.md) — chart install + key values.
 - [`ROADMAP.md`](ROADMAP.md) — planned features and known gaps.
 - [`CHANGELOG.md`](CHANGELOG.md) — release history.

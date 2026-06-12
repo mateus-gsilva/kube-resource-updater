@@ -94,7 +94,7 @@ spec:
                   # no CEL needed, no cost budget consumed. Without this, two entries
                   # with the same name silently last-win; the webhook would apply both
                   # to the same container with the second overwriting the first.
-                  # (Audit #41.)
+                  #
                   x-kubernetes-list-type: map
                   x-kubernetes-list-map-keys: ["name"]
                   description: |
@@ -120,9 +120,9 @@ spec:
                     # Cost budget: cost estimator requires bounded sizes. requests/limits
                     # have maxProperties: 16 and their string values have maxLength: 20;
                     # containers array has maxItems: 50. With these bounds all 6 rules
-                    # are within the per-expression budget of 1,000,000. (Audit #41/#42.)
+                    # are within the per-expression budget of 1,000,000.
                     x-kubernetes-validations:
-                      # ── requests ≤ limits (cross-field, audit #41) ───────────────────
+                      # ── requests ≤ limits ───────────────────
                       - rule: >-
                           !has(self.requests) || !has(self.limits) ||
                           !("memory" in self.requests) || !("memory" in self.limits) ||
@@ -133,7 +133,7 @@ spec:
                           !("cpu" in self.requests) || !("cpu" in self.limits) ||
                           quantity(self.requests["cpu"]).compareTo(quantity(self.limits["cpu"])) <= 0
                         message: "requests.cpu must not exceed limits.cpu"
-                      # ── per-unit: CPU must not carry binary SI suffixes (audit #42) ───
+                      # ── per-unit: CPU must not carry binary SI suffixes ───
                       # CPU quantities are expressed as cores (plain number) or millicores
                       # (number + "m"). Binary SI suffixes (Mi, Gi, ...) are accepted by
                       # the generic Quantity pattern but are semantically wrong for CPU
@@ -146,7 +146,7 @@ spec:
                           !has(self.limits) || !("cpu" in self.limits) ||
                           self.limits["cpu"].matches("^([0-9]+(\\.[0-9]+)?|\\.[0-9]+)(m)?$")
                         message: "limits.cpu must be a CPU quantity (e.g. '200m', '1', '2.5') — binary suffixes like Mi are not valid for CPU"
-                      # ── per-unit: memory must not carry the millicores suffix (audit #42) ──
+                      # ── per-unit: memory must not carry the millicores suffix ──
                       # Memory quantities use byte-based suffixes (Ki, Mi, Gi, ...) or plain
                       # byte count. The "m" suffix (milli-bytes) is valid Quantity grammar
                       # but rounds to 0 in the scheduler — requests.memory: "100m" means
@@ -166,7 +166,7 @@ spec:
                         # K8s DNS_LABEL_NAME max — container names longer than
                         # this fail pod creation anyway; rejecting at CRD apply
                         # gives a clearer error than the kubelet-time failure.
-                        # (Audit v3 front 8.)
+                        #
                         maxLength: 63
                       requests:
                         type: object
@@ -183,7 +183,7 @@ spec:
                         # suffix (`Ki`/`Mi`/`Gi`/`Ti`/`Pi`/`Ei`) or a decimal
                         # SI suffix (`m`/`k`/`M`/`G`/`T`/`P`/`E`). Catches typos
                         # like `"100QB"` at apply time instead of pod admission.
-                        # (Audit v3 front 8.)
+                        #
                         #
                         # Mantissa grammar is intentionally positive-only (`[0-9]+`
                         # leading digit, at most one decimal point). The original
@@ -203,7 +203,7 @@ spec:
                         # maxProperties + maxLength(additionalProperties): required by
                         # the CEL cost estimator to produce a finite bound. 16 resource
                         # types covers cpu + memory + 14 extended resources. 20-char max
-                        # covers all standard Quantity strings (Principle 6 bound: 18
+                        # covers all standard Quantity strings
                         # chars) with a 2-char safety margin.
                         maxProperties: 16
                         additionalProperties:

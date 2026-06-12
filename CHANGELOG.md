@@ -4,14 +4,25 @@ Release history for `kube-resource-updater`. Pending work lives in [ROADMAP.md](
 
 ---
 
+## 0.1.1 — Public-repo cleanup (2026-06-12)
+
+Documentation and packaging cleanup; no behavior change.
+
+- **Chart README ships in the package** — `.helmignore` no longer excludes
+  `README.md`, so Artifact Hub and `helm show readme` display it.
+- **Internal archaeology stripped** from comments, docstrings, and the QA suite
+  (references to internal chart versions, audit findings, and dev phases that
+  carried no meaning outside the original development monorepo).
+- **Internal-only docs removed** — pre-release config-interaction audits, the
+  internal integration test plan, and the planned-features sketches.
+
 ## 0.1.0 — Initial public release (2026-06-11)
 
 First public cut, extracted from the original development monorepo with a fresh
 history. Version numbering restarts at 0.1.0; the 0.x series signals that the
 public packaging (image registry, chart registry, GitHub PR live-validation) is
 still settling — the code itself has been running in production since early
-2026. Source comments that reference chart `1.x` versions refer to that
-pre-public internal release lineage.
+2026.
 
 What's included:
 

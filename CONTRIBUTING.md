@@ -58,7 +58,7 @@ DRY_RUN=true python3 main.py sync
 - **Helm templates**: comment every conditional gate with the value that
   toggles it and the reason. New templates go through
   `templates/validate.yaml` for any cross-value invariants.
-- **Log lines** follow the chart 1.19.0+ palette / banner / phase
+- **Log lines** follow the  palette / banner / phase
   convention: tag-first, structured `extra={...}` for JSON consumers,
   blank lines between blocks, no leading whitespace dependence (Argo CD's
   log viewer strips it).

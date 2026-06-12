@@ -80,7 +80,7 @@ def _resolve_prometheus_url(cfg: Config) -> str:
     """Return the explicit `config.prometheusUrl` and log it once.
 
     Auto-discovery (k8s service-DNS in `monitoring` + Prometheus CR
-    `externalUrl` fallback) was dropped in chart 1.20.0. The chart's
+    `externalUrl` fallback) was dropped The chart's
     `templates/validate.yaml` fails `helm install` when `prometheusUrl`
     is empty, and `Config.validate` mirrors that check at runtime for
     hand-edited ConfigMap drift — so reaching this function with an
@@ -299,7 +299,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                         rec.namespace, rec.target_name,
                         ", ".join(rec.init_container_names),
                     )
-                # Note (chart 1.14.0): growOnly + shrinkOnly used to SKIP the
+                # Note: growOnly + shrinkOnly used to SKIP the
                 # workload here. That had a hidden cost: SKIP removes the
                 # workload from `entries` → the CR file rebuild drops its doc
                 # → ArgoCD prunes the CR → admission webhook stops patching
@@ -337,7 +337,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     with _log_module.phase_ctx("recommend"):
         _log_module.log_phase_banner(_log, "recommend")
-        # 4. OOM-aware (chart 1.11.0). When enabled, fetch the live state
+        # 4. OOM-aware. When enabled, fetch the live state
         # (annotations from existing CRs) AND scan pods for fresh OOM events.
         # Per-workload eligibility resolves through the same hierarchy as the
         # other annotation-driven knobs (helm < ns < workload).
@@ -403,7 +403,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         # parameter — each pair's `Config.create_mr` is the effective per-workload
         # value (resolver already merged helm < ns < workload). The writeback
         # buckets entries by `create_mr` and emits up to two pushes per repo:
-        # one direct, one MR (chart 1.13.0+). The CLI flag `--mr` still flips
+        # one direct, one MR. The CLI flag `--mr` still flips
         # the helm-level default before resolution, kept for local dev parity.
         results = write_back_webhook_all(
             workloads_with_configs=pairs,

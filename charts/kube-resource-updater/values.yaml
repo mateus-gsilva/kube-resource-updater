@@ -107,7 +107,7 @@ config:
   ## @param config.dryRun Skip git/MR operations (log only)
   dryRun: false
   ## Routing of write-back operations to git. `true` opens a GitLab MR;
-  ## `false` pushes directly to the target branch. As of chart 1.13.0 this
+  ## `false` pushes directly to the target branch. As of  this
   ## value is the **cluster-wide default**, overridable per Namespace OR
   ## per workload via annotation following the standard hierarchy:
   ##
@@ -183,8 +183,8 @@ config:
   ## @param config.shrinkOnly Global shrink-only mode: only decrease resource values, never increase. Per-app annotation overrides.
   shrinkOnly: false
 
-  ## OOM-aware (chart 1.11.0). Detects `OOMKilled` events on opted-in
-  ## workloads at sync time (slow-path only — chart 1.10.0's webhook
+  ## OOM-aware. Detects `OOMKilled` events on opted-in
+  ## workloads at sync time (slow-path only — 's webhook
   ## fast-path was removed; see ROADMAP). When the most recent OOM
   ## finishedAt is newer than what's recorded on the CR's
   ## `kube-resource-updater.io/oom-last-event.<container>` annotation,
@@ -210,7 +210,7 @@ config:
   oomDetectionEnabled: true
   ## @param config.oomBumpFactor Multiplier on the limit at OOM time (1.5 = +50% headroom). Bumped value also stamped as the CR's `oom-floor` annotation.
   oomBumpFactor: "1.5"
-  ## OOM floor stickiness (chart 1.12.0). When `true` (default), an
+  ## OOM floor stickiness. When `true` (default), an
   ## OOM bump is recorded as a sticky `oom-floor.<container>` annotation
   ## on the CR — every subsequent sync clamps the recommendation up to
   ## this floor so a Prom-driven recommendation can never drop the limit
@@ -271,7 +271,7 @@ config:
     branch: "main"
     ## @param config.crWriteback.path In-repo directory where files land (REQUIRED)
     path: ""
-  ## Prometheus URL — REQUIRED since chart 1.20.0 (auto-discovery removed).
+  ## Prometheus URL — REQUIRED (auto-discovery removed).
   ##
   ## Set explicitly to a reachable Prometheus endpoint. `helm install/upgrade`
   ## fails when this is empty AND `cronjob.enabled: true`. The kube-prometheus-
@@ -318,7 +318,7 @@ config:
     ## @param config.mr.removeSourceBranch Delete source branch after merge (kept true for the historical default)
     removeSourceBranch: true
 
-## @section Git credentials (provider-agnostic, Phase 3)
+## @section Git credentials
 ##
 ## Use this stanza for all new installations. Both "gitlab" and "git" are wired
 ## into the same Secret and env vars — the chart prefers git.* when both are set
@@ -469,7 +469,7 @@ resources:
     cpu: 500m
     memory: 256Mi
 
-## @section Mutation Webhook (Phase 1 of webhook migration — see docs/webhook-migration.md in the project repo)
+## @section Mutation Webhook
 ##
 ## When enabled, the chart deploys an additional Deployment that runs the in-cluster
 ## mutating admission webhook. The webhook reads ResourceOverride CRs and patches
@@ -543,7 +543,7 @@ webhook:
   ## cert-manager dependency. The chart-level Secret is created on demand by
   ## the reconciler — there is no template for it here.
   ##
-  ## The MWC/VWC templates intentionally do NOT render `caBundle` (ROADMAP #58):
+  ## The MWC/VWC templates intentionally do NOT render `caBundle`:
   ## omitting the field means no GitOps engine owns it via SSA, so the
   ## reconciler's injected value persists through every sync without a brief
   ## fail-open window. Set `webhook.caBundle` ONLY when using an external PKI

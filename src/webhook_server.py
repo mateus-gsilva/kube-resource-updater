@@ -425,7 +425,7 @@ def run(
 
     loop.run_until_complete(_serve())
 
-    # Audit v2 finding D14: kubelet sends SIGTERM (not SIGINT) when
+    # kubelet sends SIGTERM (not SIGINT) when
     # terminating the pod. Pre-1.21.0 the loop only caught
     # KeyboardInterrupt (SIGINT, the ctrl-C signal), so the cleanup
     # block never ran on a k8s shutdown — daemons leaked, in-flight

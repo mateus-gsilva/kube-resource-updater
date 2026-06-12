@@ -183,7 +183,7 @@ spec:
       limits:   { cpu: 200m, memory: 192Mi }
 ```
 
-One CR per workload, identified by `metadata.name == workload-name`. Container resources land flat under `spec.containers[i].{requests,limits}` (no `resources:` wrapper — the CRD schema rejects it). OOM-aware annotations are per-container (chart 1.11.0+).
+One CR per workload, identified by `metadata.name == workload-name`. Container resources land flat under `spec.containers[i].{requests,limits}` (no `resources:` wrapper — the CRD schema rejects it). OOM-aware annotations are per-container.
 
 ### Step 4 — The Merge Request
 
@@ -440,7 +440,7 @@ CronJob fires
 │    Applies the helm < ns < workload hierarchy to produce an effective Config
 │    Filters: skip / grow+shrink conflict / no containers / etc.
 │
-├─ OOM-aware (chart 1.11.0+, when oomDetectionEnabled)
+├─ OOM-aware
 │    fetch_oom_state(opt-in namespaces)
 │      Lists CRs via apiserver, reads oom-floor / oom-last-event /
 │      oom-boost-history annotations (source of truth, not the git clone).
@@ -475,7 +475,7 @@ One git clone + one commit per `crWriteback.repoUrl`, regardless of how many nam
 ## Prometheus URL
 
 Set `config.prometheusUrl` explicitly in the chart values — auto-discovery
-was removed in chart 1.20.0. The chart's `templates/validate.yaml` aborts
+was removed The chart's `templates/validate.yaml` aborts
 `helm install/upgrade` when the field is empty AND `cronjob.enabled: true`
 (webhook-only installs don't need a URL since admission requests carry
 the Pod inline). At runtime, `Config.validate` mirrors the same check
@@ -684,12 +684,12 @@ metadata:
 
 Modes apply independently to each container, request and limit dimension.
 
-**Operation order** (chart 1.14.0+) — relative to OOM-aware and bounds:
+**Operation order** — relative to OOM-aware and bounds:
 
 ```
 1. compute_from_prom()        — raw recommendation
 2. apply_oom_bump()            — if fresh OOMKilled event detected
-3. apply_sticky_floor()        — prior OOM floor (chart 1.11.0+)
+3. apply_sticky_floor()        — prior OOM floor
 4. apply_grow_shrink(old_res)  — operator POLICY clamp vs apiserver-source CR
 5. enforce_floors_and_ceilings — hard INVARIANTS always win (min*/max*)
 ```
@@ -706,7 +706,7 @@ Modes apply independently to each container, request and limit dimension.
 >
 > `growOnly` has no conflict — bump grows, growOnly allows growth.
 
-> **Both flags active = "freeze":** chart 1.14.0+. Pre-1.14.0 the workload was SKIPPED with a warning (which had a hidden cost: the CR was removed from git → ArgoCD pruned it → admission webhook stopped patching → pods went back to deployment-spec resources). Now both flags active means "freeze the workload at its current CR values; OOM bumps are suppressed by `shrinkOnly`; only floors/ceilings can still change values." Logged loudly per sync:
+> **Both flags active = "freeze":** the workload is held at its current CR values; OOM bumps are suppressed by `shrinkOnly`; only floors/ceilings can still change values. Logged loudly per sync:
 >
 > ```
 > [freeze] my-app/api: growOnly + shrinkOnly both active — workload frozen at current CR values
@@ -714,13 +714,13 @@ Modes apply independently to each container, request and limit dimension.
 >     with a separate warning). Remove one flag to resume normal operation.
 > ```
 
-> **First sync for a workload:** before chart 1.14.0, growOnly/shrinkOnly were silent no-ops because `old_res` was hardcoded `None`. From 1.14.0 the apiserver-source CR's `spec.containers` is the comparison baseline. On the very FIRST sync for a workload (no CR exists yet), grow/shrink still no-op — there's nothing to compare against. Subsequent syncs use the previously-written CR as the baseline.
+> **First sync for a workload:** the apiserver-source CR's `spec.containers` is the comparison baseline for grow/shrink. On the very FIRST sync for a workload (no CR exists yet), grow/shrink no-op — there's nothing to compare against. Subsequent syncs use the previously-written CR as the baseline.
 
 ---
 
 ## Write-back target
 
-Since chart 1.0.0 the tool writes a single target: one `ResourceOverride` CR per workload, grouped per-namespace into one multi-doc YAML file inside the cluster's gitops repo. There are no Helm-value-tree or Kustomize-patch write-back modes anymore — the CR + admission webhook combination decouples the resource override from the underlying app's structure.
+The tool writes a single target: one `ResourceOverride` CR per workload, grouped per-namespace into one multi-doc YAML file inside the cluster's gitops repo. There are no Helm-value-tree or Kustomize-patch write-back modes anymore — the CR + admission webhook combination decouples the resource override from the underlying app's structure.
 
 ### File layout
 
@@ -825,7 +825,7 @@ run normally, but no git operations are performed. Computed values are logged.
 
 ## Annotations reference
 
-> Since chart 1.0.0 the tool runs in **webhook + `ResourceOverride` CRD** mode (multi-cluster legacy was removed). Annotations are set on **`Namespace`** (opt-in marker — required) and optionally on individual workloads (`Deployment` / `StatefulSet`) to override defaults for that workload only. All keys use the prefix `kube-resource-updater.` and camelCase value names matching `values.yaml`. The full source of truth is [`src/overrides.py`](../src/overrides.py) (`_KEY_SPEC`).
+> The tool runs in **webhook + `ResourceOverride` CRD** mode. Annotations are set on **`Namespace`** (opt-in marker — required) and optionally on individual workloads (`Deployment` / `StatefulSet`) to override defaults for that workload only. All keys use the prefix `kube-resource-updater.` and camelCase value names matching `values.yaml`. The full source of truth is [`src/overrides.py`](../src/overrides.py) (`_KEY_SPEC`).
 
 ### Markers (no Config field; behavior-only)
 
@@ -838,7 +838,7 @@ run normally, but no git operations are performed. Computed values are logged.
 | `kube-resource-updater.oomDetectionEnabled` | Namespace OR workload | Opt-out of OOM-aware bumps for a specific workload (default `true` via helm). |
 | `kube-resource-updater.oomFloorEnabled` | Namespace OR workload | Makes OOM bumps **sticky** via `oom-floor.<container>` annotation on the CR (default `true`). False = one-shot bumps; the limit goes up this sync but no floor is recorded, so the next Prom-driven recommendation can drop the limit again. |
 | `kube-resource-updater.oomFloorReset` | Namespace OR workload | One-shot opt-in. `"true"` causes the next sync to clear `oom-floor.<c>` + `oom-last-event.<c>` + `oom-boost-history.<c>` for every container of every CR in scope. The tool does NOT auto-remove this annotation — operator deletes it manually after confirming the reset took effect. |
-| `kube-resource-updater.createMr` | Namespace OR workload | `"true"` (default) opens a Merge Request for this workload's diff; `"false"` pushes direct to the target branch. Chart 1.13.0+: was previously parsed but ignored (global helm value used instead); now resolves through workload > namespace > helm hierarchy. A single sync can produce two parallel pushes per repo: one direct (workloads with `createMr=false`), one MR (workloads with `createMr=true`). |
+| `kube-resource-updater.createMr` | Namespace OR workload | `"true"` (default) opens a Merge Request for this workload's diff; `"false"` pushes direct to the target branch; resolution follows the workload > namespace > helm hierarchy. A single sync can produce two parallel pushes per repo: one direct (workloads with `createMr=false`), one MR (workloads with `createMr=true`). |
 
 ### Config overrides (anything from the chart's `config:` block)
 
@@ -964,7 +964,7 @@ All margins are fractions (e.g. `0.20` = +20%). Per-type margins fall back to
 | `cpuLimitMultiplier` | `CPU_LIMIT_MULTIPLIER` | `4` | CPU limit = CPU request × N when no Prometheus data |
 | `memoryLimitMultiplier` | `MEMORY_LIMIT_MULTIPLIER` | `3` | Memory limit = memory request × N when no Prometheus data |
 
-### OOM-aware (chart 1.11.0+)
+### OOM-aware
 
 Slow-path scans `pod.status.containerStatuses[*].lastState.terminated.reason == "OOMKilled"` at sync time and bumps memory limits on opted-in workloads. Fully covered below in [OOM-aware bumps](#oom-aware-bumps).
 
@@ -1068,7 +1068,7 @@ Then the bump path runs normally — the workload escapes the OOM loop on the fi
 
 ## Credential resolution
 
-Git credentials come from the **`GITLAB_TOKEN`** env var only (the chart populates it from `gitlab.token` or `gitlab.existingSecret`). The ArgoCD repo-Secret fallback that earlier versions supported was removed in chart 1.2.0 — a single source kept the matrix of "where did the token actually come from?" small.
+Git credentials come from the **`GITLAB_TOKEN`** env var only (the chart populates it from `gitlab.token` or `gitlab.existingSecret`). The ArgoCD repo-Secret fallback that earlier versions supported was removed — a single source kept the matrix of "where did the token actually come from?" small.
 
 Auth format used for `git clone`:
 
@@ -1165,7 +1165,7 @@ Gated on `config.oomDetectionEnabled` (default true):
 | `pods` | `get`, `list` | Scan `containerStatuses[*].lastState.terminated.reason` at sync time |
 | `resourceoverrides.kube-resource-updater.io` | `get`, `list` | Read live `oom-floor.<container>` / `oom-last-event.<container>` annotations as source of truth |
 
-**No discovery-mode grants** (chart 1.20.0+): Prometheus auto-discovery was
+**No discovery-mode grants**: Prometheus auto-discovery was
 removed along with the three cluster-wide reads it required (`endpoints`,
 `services`, `prometheuses.monitoring.coreos.com`). The operator sets
 `config.prometheusUrl` explicitly; the chart fails `helm install` when
@@ -1177,7 +1177,7 @@ it's empty.
 |---|---|---|
 | `namespaces` | `get`, `list`, `watch` | Cache opt-in markers, short-circuit admission for non-opted-in namespaces |
 | `resourceoverrides.kube-resource-updater.io` | `get`, `list`, `watch` | Informer that feeds `/mutate-pod` and `/validate-resourceoverride` |
-| `resourceoverrides.kube-resource-updater.io/status` | `patch` | Stamp `lastAppliedAt` (chart 1.3.0+, via `webhook.status.enabled`) |
+| `resourceoverrides.kube-resource-updater.io/status` | `patch` | Stamp `lastAppliedAt` |
 | `mutatingwebhookconfigurations`, `validatingwebhookconfigurations` | `get`, `patch` | In-process cert reconciler patches `clientConfig.caBundle` on the chart's own MWC/VWC objects |
 | `deployments.apps`, `statefulsets.apps` | `get`, `list`, `watch` | Auto-rollout watcher (gated on `webhook.autoRollout.enabled`) |
 | `deployments.apps`, `statefulsets.apps` | `patch` | Stamp `restartedAt` on the workload's PodTemplate when its CR changes (gated on `webhook.autoRollout.enabled`) |
@@ -1209,7 +1209,7 @@ URL is configured explicitly or the in-cluster auto-discovery finds a
 reachable instance.
 
 **What's NOT a dependency:**
-  - **cert-manager** — dropped in chart 1.1.0. The webhook now owns its own
+  - **cert-manager** — dropped The webhook now owns its own
     serving cert through an in-process reconciler.
   - **VPA** — removed in 1.0.0. The tool never read VerticalPodAutoscaler
     objects; it always read raw Prometheus.
@@ -1243,8 +1243,8 @@ nodeSelector:
 
 ### Prometheus URL configuration
 
-Single-cluster only (multi-cluster was removed in chart 1.0.0). `config.prometheusUrl`
-is **required** since chart 1.20.0 — the helm install fails when it's empty AND
+Single-cluster only. `config.prometheusUrl`
+is **required** — the helm install fails when it's empty AND
 `cronjob.enabled: true`. The kube-prometheus-stack convention is:
 
 ```yaml
@@ -1338,7 +1338,7 @@ regex-parsing the message body:
 | Field | When emitted | Value |
 |---|---|---|
 | `tag`   | Any line whose message starts with `[<word>]` (e.g. `[OK]`, `[oom-bump]`, `[DRY RUN]`). | The bracketed token without brackets — `"OK"`, `"oom-bump"`, `"DRY RUN"`. The message body keeps the bracketed form. |
-| `phase` | Any line emitted inside a `phase_ctx(...)` block in `main.cmd_sync` (chart 1.16.0+). | One of `"discovery"`, `"recommend"`, `"result"`. |
+| `phase` | Any line emitted inside a `phase_ctx(...)` block in `main.cmd_sync`. | One of `"discovery"`, `"recommend"`, `"result"`. |
 
 Per-event `extra={...}` fields:
 
@@ -1364,13 +1364,13 @@ Example Loki queries:
 # Which discovery method is being used for Prometheus
 {job="kube-resource-updater"} | json | discovery_method!=""
 
-# All MR URLs opened (chart 1.16.0+: filter on the `tag` field)
+# All MR URLs opened
 {job="kube-resource-updater"} | json | tag="OK" | mode="mr"
 
-# All OOM bumps applied (chart 1.16.0+)
+# All OOM bumps applied
 {job="kube-resource-updater"} | json | tag="oom-bump"
 
-# Per-workload delta on a specific container (chart 1.16.0+)
+# Per-workload delta on a specific container
 {job="kube-resource-updater"} | json
   | namespace="my-app" | container="cache"
   | line_format "{{.req_cpu}} cpu, {{.req_mem}} mem"

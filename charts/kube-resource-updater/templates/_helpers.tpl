@@ -104,7 +104,7 @@ imagePullSecrets:
 {{- end }}
 
 {{/*
-Git token Secret name — provider-agnostic (Phase 3).
+Git token Secret name — provider-agnostic.
 
 Resolution order (first non-empty wins):
   1. git.existingSecret      → operator-managed Secret, referenced by name.
@@ -247,8 +247,7 @@ app.kubernetes.io/component: webhook
 {{- end -}}
 
 {{/*
-NOTE: `webhook.certName` and `webhook.dnsNames` helpers were removed in
-chart 1.20.0. Cert-manager was dropped in 1.1.0 — the in-process cert
+NOTE: `webhook.certName` and `webhook.dnsNames` helpers are not needed — the in-process cert
 reconciler (src/webhook_cert.py) generates the serving cert at startup
 and dials the apiserver to patch the MWC/VWC caBundle. The Secret name
 and DNS SANs are computed inside the Python code from `POD_NAMESPACE`

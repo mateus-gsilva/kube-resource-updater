@@ -68,14 +68,14 @@ AUTO_ROLLOUT_KEY = "autoRollout"
 # wants `istio-proxy` managed even though the Namespace excludes it).
 SKIP_CONTAINERS_KEY = "skipContainers"
 
-# OOM-aware per-workload opt-out (chart 1.11.0). Defaults to the chart's
+# OOM-aware per-workload opt-out. Defaults to the chart's
 # `config.oomDetectionEnabled`; operator can flip to "false" on a specific
 # workload that does its own GC dance and shouldn't trigger auto-bumps.
 # Resolution: same workload > namespace > helm-default chain as
 # `autoRollout` and the value-bearing keys.
 OOM_DETECTION_ENABLED_KEY = "oomDetectionEnabled"
 
-# OOM floor stickiness (chart 1.12.0). Defaults to the chart's
+# OOM floor stickiness. Defaults to the chart's
 # `config.oomFloorEnabled` (default true). False on workload/namespace
 # means: bump still fires on a fresh OOM (immediate help), but the
 # resulting limit is NOT recorded as a sticky floor — the next sync's
@@ -86,7 +86,7 @@ OOM_DETECTION_ENABLED_KEY = "oomDetectionEnabled"
 # Resolution: workload > namespace > helm.
 OOM_FLOOR_ENABLED_KEY = "oomFloorEnabled"
 
-# One-shot floor reset (chart 1.12.0). When set to "true" on a
+# One-shot floor reset. When set to "true" on a
 # Namespace OR workload, the next sync clears that workload's
 # `oom-floor.<container>` / `oom-last-event.<container>` /
 # `oom-boost-history.<container>` annotations on every container

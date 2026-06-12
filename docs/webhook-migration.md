@@ -1,18 +1,16 @@
-# Migration to Mutation Webhook architecture
+# Architecture: mutation webhook + ResourceOverride CRD
 
-> **Status:** ✅ **Complete.** Cutover landed in chart `1.0.0` (annotation-only namespace opt-in + `ResourceOverride` CRD only). The legacy Helm/Kustomize write-back paths described in the original [`ARCHITECTURE.md`](../ARCHITECTURE.md) were removed in the same release. This doc is kept as the **design record** — the rationale, CRD schema, RBAC, and trade-offs documented below all reflect the running code.
->
-> **Subsequent evolution post-cutover:**
-> - Chart `1.4.0` — Auto-rollout watcher (stamp `restartedAt` on workloads when their CR changes)
-> - Chart `1.5.0` — Validating admission webhook (reject selector-overlap conflicts)
-> - Chart `1.6.0` — `skipContainers` annotation + automatic init-container skip
-> - Chart `1.7.0` — Configurable MR metadata (`assignees` / `reviewers` / `labels` / `squash`)
-> - Chart `1.8.0`–`1.10.0` — three attempts at OOM-aware bumps (Prometheus-driven trap detection → event-driven webhook trigger → webhook fast-path). **All three superseded** in `1.11.0`.
-> - Chart `1.11.0` — OOM-aware **rewrite, slow-path only**. The fast-path (webhook informer + direct git writes from the webhook process) was deleted after live testing surfaced ~25 integration bugs; the rewrite scans `pod.status.containerStatuses[*].lastState.terminated.reason == "OOMKilled"` at sync time and bumps memory via per-container CR annotations. See [`ROADMAP.md`](../ROADMAP.md) entry for the full design.
-> - Chart `1.11.1` — Drop hardcoded `--mr` CLI arg from chart default args (`config.createMr` becomes the single source of truth).
-> - Chart `1.12.0` — OOM floor stickiness toggle (`oomFloorEnabled`) + one-shot reset (`oomFloorReset`) annotations.
->
-> **Why this doc exists:** the original (chart < 1.0.0) architecture wrote resources by parsing Helm `values:` blocks and computing where in the chart's value tree the `resources:` key belonged for each workload. That approach hit a hard ceiling on multi-source apps, `$values` reference patterns, charts that didn't expose sub-component resources, workload names that didn't tokenize into chart paths, and shared paths between two workloads — all unsolvable without per-chart special cases. The replacement design (this document) ships resource overrides as a uniform Custom Resource and applies them via mutating admission, independent of the underlying app's chart structure.
+This is the design record for the tool's architecture — the rationale, CRD
+schema, RBAC, and trade-offs below all reflect the running code.
+
+**Why this design:** the obvious way to right-size workloads is to write the
+`resources:` block into each chart's Helm `values:` tree. That hits a hard
+ceiling on multi-source apps, `$values` reference patterns, charts that don't
+expose sub-component resources, workload names that don't tokenize into chart
+paths, and shared paths between two workloads — all unsolvable without per-chart
+special cases. Instead, the tool ships resource overrides as a uniform Custom
+Resource (`ResourceOverride`) and applies them via mutating admission,
+independent of the underlying app's chart structure.
 
 ---
 
@@ -326,7 +324,7 @@ spec:
 
 The webhook patches Pods, but the recommended pattern is to also have the controller mutate
 the owning Deployment/StatefulSet's pod template via SSA (server-side apply) so that helm
-upgrades don't reset resources. This is a Phase 2 enhancement.
+upgrades don't reset resources. This is a future enhancement.
 
 ---
 
@@ -430,80 +428,10 @@ This is robust across Helm, Kustomize, raw YAML, and operator-managed workloads.
    `Pod`). On helm upgrade, the new chart-rendered Deployment template will not contain the
    override (the override only appears at admission time). This means the running ReplicaSet's
    pod template *does* have the override (because it was patched), but the next helm-rendered
-   Deployment template won't — leading to ArgoCD seeing drift. **Mitigation (Phase 2):** also
+   Deployment template won't — leading to ArgoCD seeing drift. **Mitigation:** also
    reconcile Deployment/StatefulSet templates via SSA from a separate controller, so the
    template itself reflects the overrides. The webhook becomes a backstop for pods that
    bypass the controller.
-
----
-
-## Migration plan
-
-### Phase 1 — Webhook & CRD (greenfield)
-
-- [ ] Define `ResourceOverride` CRD (`v1`).
-- [ ] Implement webhook (Go, controller-runtime).
-  - [ ] Informer for `ResourceOverride`.
-  - [ ] Admission handler for `Pod` CREATE/UPDATE.
-  - [ ] VPA conflict detection.
-  - [ ] Pod annotation for traceability.
-- [ ] Helm chart for the webhook (`charts/resource-updater-webhook/`).
-  - [ ] cert-manager `Certificate`.
-  - [ ] `MutatingWebhookConfiguration` with `inject-ca-from` annotation.
-  - [ ] Deployment + Service + RBAC.
-- [ ] Validation webhook (overlap detection between `ResourceOverride`s).
-- [ ] Unit + integration tests (envtest).
-- [ ] Deploy to a single test cluster; manually create CRs for 2-3 apps; verify pod patching.
-
-### Phase 2 — Tool dual-write
-
-- [ ] Add `--writeback-mode=helm|webhook|both` flag (default `helm`).
-- [ ] New module `writeback_webhook.py`:
-  - [ ] Generate `ResourceOverride` YAML per workload.
-  - [ ] Write to `clusters/<cluster>/resource-overrides/<namespace>/<workload>.yaml`.
-  - [ ] Group MR files by gitops repo (single MR per repo, same as today).
-- [ ] In `both` mode, both writeback paths run; CRs are created alongside existing helm edits.
-- [ ] Update tests + QA script to cover the new path.
-
-### Phase 3 — Pilot
-
-- [ ] Deploy webhook to `staging`.
-- [ ] Create `Application` `resource-overrides-stg` syncing the new folder.
-- [ ] Switch tool to `--writeback-mode=both` for stg.
-- [ ] Run for one week; compare CR-driven values vs helm-rendered values for divergence.
-- [ ] Validate no regressions in pod resource limits via `kubectl describe pod`.
-
-### Phase 4 — Cutover
-
-- [ ] Flip stg to `--writeback-mode=webhook`.
-- [ ] Open a one-time MR to remove all `resources:` blocks from the inline helm values of
-      stg Applications (helm defaults take over for any workload not yet covered by a CR).
-- [ ] Repeat phases 3-4 for `ops`, then `production` (when reached).
-
-### Phase 5 — Cleanup
-
-- [ ] Delete `_update_app_inline_values` and all helm path detection code.
-- [ ] Delete `writeback_kustomize.py` (replaced by webhook for kustomize apps too).
-- [ ] Delete `detect_helm_path` chart registry.
-- [ ] Delete `helm-values-path.*`, `gitops-repo`, `app-repo`, `workload-alias.*` annotations
-      (warn for one release, then remove parser support).
-- [ ] Mark BUG-01..05 in ROADMAP as "obsolete after webhook migration — code path removed".
-- [ ] Update README, ARCHITECTURE, docs/reference.md, docs/helm-path-detection.md
-      (the last is deleted; replaced by `docs/webhook-migration.md` becoming `docs/webhook.md`).
-
----
-
-## Effort estimate
-
-| Phase | Effort |
-|---|---|
-| Phase 1 — webhook + CRD + chart | ~1 week |
-| Phase 2 — tool refactor + dual-write | ~3 days |
-| Phase 3 — pilot in stg | 1 week (calendar, mostly soak) |
-| Phase 4 — cutover stg + ops | ~2 days |
-| Phase 5 — cleanup | ~2 days |
-| **Total active engineering** | **~2.5 weeks** |
-| **Total calendar** | **~4 weeks** including soak |
 
 ---
 
@@ -514,8 +442,8 @@ This is robust across Helm, Kustomize, raw YAML, and operator-managed workloads.
   conventional and easier to RBAC. **Decision: namespaced for v1.**
 - Should the webhook also annotate the parent Deployment/StatefulSet (not just the pod) so that
   `kubectl get deploy -o yaml` shows the override? Adds a controller component. **Decision:
-  Phase 2 enhancement, not in initial scope.**
+  a future enhancement, not in initial scope.**
 - Status sub-resource — should `appliedToPodCount` be tracked? Useful for the Grafana dashboard
-  (ROADMAP "Observability" section) but adds a controller. **Decision: Phase 2.**
+  (ROADMAP "Observability" section) but adds a controller. **Decision: deferred.**
 - Do we want a CLI command on the tool to `kubectl rollout restart` after merge, or is that
   out of scope? **Decision: opt-in flag in tool, off by default.**

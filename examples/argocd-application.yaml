@@ -12,9 +12,9 @@
 #                               `ResourceOverride` CRs land).
 #   <YOUR_CHART_REPO>           where the kube-resource-updater chart is hosted.
 #   <CHART_VERSION>             pin a released tag (e.g. "1.20.0").
-#   <YOUR_REGISTRY>/...         your image registry (chart 1.20.0 defaults to
+#   <YOUR_REGISTRY>/...         your image registry (defaults to
 #                               the upstream-dev image; override for production).
-#   <YOUR_PROMETHEUS_URL>       reachable Prometheus URL; required since 1.20.0.
+#   <YOUR_PROMETHEUS_URL>       reachable Prometheus URL; required 1.20.0.
 #   <YOUR_GITLAB_HOST>          GitLab instance the MRs target.
 #
 # After install: opt a namespace in with the annotation
@@ -47,7 +47,7 @@ spec:
             pullPolicy: IfNotPresent
 
           config:
-            # Required since chart 1.20.0 — helm install fails if empty.
+            # required — helm install fails if empty.
             prometheusUrl: "<YOUR_PROMETHEUS_URL>"
             # Recommendation knobs (cluster-wide defaults; override per-namespace
             # or per-workload via `kube-resource-updater.<key>` annotations).

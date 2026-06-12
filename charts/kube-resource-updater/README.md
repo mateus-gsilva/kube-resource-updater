@@ -19,7 +19,7 @@ is needed.
 
 ```bash
 helm install kube-resource-updater \
-  oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater --version 0.1.0 \
+  oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater --version 0.1.1 \
   --namespace kube-resource-updater --create-namespace \
   --values my-values.yaml
 ```
@@ -79,7 +79,7 @@ config:
   maxMemoryLimitMi: "0"            # also caps OOM bumps when > 0
   coldStartCpuFloorM: 10           # cold-start floor when Prom has no history — avoids the 1m throttle trap
 
-# OOM-aware (chart 1.11.0+)
+# OOM-aware
   oomDetectionEnabled: true
   oomBumpFactor: "1.5"             # ≥ 1.0 (clamped at load with warning)
   oomFloorEnabled: true            # false = bumps don't become sticky floors
@@ -92,7 +92,7 @@ webhook:
     enabled: true                  # opt-in per-workload via annotation
     debounceSeconds: 30
 
-# MR metadata (chart 1.7.0+)
+# MR metadata
 config:
   mr:
     reviewers: "alice,bob"         # CSV usernames; resolved to IDs at sync time
@@ -123,5 +123,5 @@ Chart version mirrors the tool's `appVersion` (see [`Chart.yaml`](Chart.yaml)). 
 ## More documentation
 
 - Tool reference, annotations, OOM-aware bump algorithm, RBAC: [`docs/reference.md`](../../docs/reference.md)
-- Architecture rationale + migration history: [`docs/webhook-migration.md`](../../docs/webhook-migration.md)
+- Architecture rationale + design: [`docs/webhook-migration.md`](../../docs/webhook-migration.md)
 - Roadmap + release history: [`ROADMAP.md`](../../ROADMAP.md), [`CHANGELOG.md`](../../CHANGELOG.md)

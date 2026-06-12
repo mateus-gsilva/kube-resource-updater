@@ -33,16 +33,16 @@ Run:
 #   section_grow_shrink                            grow-only / shrink-only — applied to requests and limits
 #   section_floors                                 _enforce_floors — raises req+lim when below floor; never lowers
 #   section_rounding                               _build_container_resources — rounding + ceiling order
-#   section_colocation                             Prometheus URL — explicit, no auto-discovery (chart 1.20.0)
-#   section_promql_injection                       PromQL injection — label-value + regex escape (audit v3 front 1)
-#   section_mr_timeouts_and_description_cap        MR timeouts + description cap (audit v3 front 3)
-#   section_mr_orphan_branch_recovery              MR orphan-branch recovery (audit #53 — Principle 8)
-#   section_run_subprocess_timeout                 _run subprocess timeout (audit #54 — Principle 7)
-#   section_memory_parser_edges                    Memory parser edges — Pi/Ei, decimal suffixes, sci notation (audit v3 
-#   section_yaml_rendering_quirks                  YAML rendering — ruamel auto-quote on YAML-special label values (audit
-#   section_crd_schema_tightening                  CRD schema tightening — quantity pattern + name maxLength (audit v3 fr
-#   section_crd_cel_hardening                      CRD CEL hardening — list-map-keys + requests≤limits + per-unit (audit 
-#   section_webhook_patch_corners                  Webhook admission patch — corner cases (audit v3 front 4)
+#   section_colocation                             Prometheus URL — explicit, no auto-discovery
+#   section_promql_injection                       PromQL injection — label-value + regex escape
+#   section_mr_timeouts_and_description_cap        MR timeouts + description cap
+#   section_mr_orphan_branch_recovery              MR orphan-branch recovery
+#   section_run_subprocess_timeout                 _run subprocess timeout
+#   section_memory_parser_edges                    Memory parser edges — Pi/Ei, decimal suffixes, sci notation
+#   section_yaml_rendering_quirks                  YAML rendering — ruamel auto-quote on YAML-special label values
+#   section_crd_schema_tightening                  CRD schema tightening — quantity pattern + name maxLength
+#   section_crd_cel_hardening                      CRD CEL hardening — list-map-keys + requests≤limits + per-unit
+#   section_webhook_patch_corners                  Webhook admission patch — corner cases
 #   section_prefetch                               prefetch_prometheus_parallel — cache + dedup
 #   section_credentials_and_prometheus_modes       Credentials + Prometheus URL resolution (single source / explicit only
 #   section_selector_inference                     Selector inference — _derive_selector across chart conventions
@@ -59,43 +59,40 @@ Run:
 #   section_cache_unparseable_modified_leak        ResourceOverrideCache — drop stale on un-parseable MODIFIED
 #   section_cache_bootstrap_retry                  Cache bootstrap retry — survives transient API failure (methodology pa
 #   section_create_mr_bucketing                    createMr per-workload bucketing — pass-1 carry-forward + pass-2 full s
-#   section_dry_run_bucketing                      dryRun per-workload bucketing — audit #50
-#   section_cr_name_collision                      CR name collision — Deployment + StatefulSet same-name disambiguation
+#   section_dry_run_bucketing                      dryRun per-workload bucketing — #   section_cr_name_collision                      CR name collision — Deployment + StatefulSet same-name disambiguation
 #   section_config_validate                        Config.validate — fail-fast hardening
-#   section_margin_default_safe                    Audit #2 — marginFraction default safety (>= 0.05)
+#   section_margin_default_safe                    — marginFraction default safety (>= 0.05)
 #   section_log_formatter                          log formatter — tag padding + pastel color + JSON sanitization
 #   section_resolver                               resolver — helm / namespace / workload override matrix
 #   section_discovery_auth_raise                   discovery — raise on auth failure (401/403)
-#   section_mr_retry_on_429_and_5xx                MR retry on 429 + 5xx (ROADMAP #15+#20 — Principle 7)
-#   section_cache_reconnect_backoff                Cache watch-reconnect backoff + readiness flip (ROADMAP #52 — Principl
+#   section_mr_retry_on_429_and_5xx                MR retry on 429 + 5xx
+#   section_cache_reconnect_backoff                Cache watch-reconnect backoff + readiness flip
 #   section_safe_json_non_json_body                _safe_json — non-JSON 200 body handling (audit follow-up)
-#   section_webhook_cert_san_clusterdomain         Webhook cert SAN — configurable clusterDomain (ROADMAP #31 — Principle
-#   section_mr_description_truncation_count        MR description truncation — drop-count footer (ROADMAP #11)
-#   section_oom_bump_cap_with_investigation        OOM bump runaway-cap + investigation annotation (ROADMAP #16)
-#   section_cold_start_cpu_floor                   Cold-start CPU floor — Audit #10
-#   section_oom_bump_clamp_warning                 OOM bump clamp warning — Audit #22
-#   section_dependency_pins                        Dependency pins (closed upstream regressions)
+#   section_webhook_cert_san_clusterdomain         Webhook cert SAN — configurable clusterDomain
+#   section_mr_description_truncation_count        MR description truncation — drop-count footer
+#   section_oom_bump_cap_with_investigation        OOM bump runaway-cap + investigation annotation
+#   section_cold_start_cpu_floor                   Cold-start CPU floor — #   section_oom_bump_clamp_warning                 OOM bump clamp warning — #   section_dependency_pins                        Dependency pins (closed upstream regressions)
 #   section_trivial_log_and_defaults               Trivial batch — log polish + default hygiene
 #   section_detect_scrape_interval                 detect_scrape_interval — scrape interval auto-detection
 #   section_request_query_single_series            Request query single-series guarantee — cross-workload max bug fix
 #   section_irate_lookback_dynamic                 irate lookback window dynamic with step (Bug 2)
 #   section_typo_warning_known_keys                Typo warning uses KNOWN_KEYS (includes behaviour keys) — Bug 1
 #   section_status_flush_non_api_exception         flush_once non-ApiException re-queues remaining CRs — Bug 2
-#   section_cert_malformed_base64                  webhook_cert malformed base64 → _regenerate_and_exit, not spin loop — 
-#   section_cert_noreturn_annotation               webhook_cert _regenerate_and_exit return annotation is NoReturn — Bug 
+#   section_cert_malformed_base64                  webhook_cert malformed base64 → _regenerate_and_exit, not spin loop —
+#   section_cert_noreturn_annotation               webhook_cert _regenerate_and_exit return annotation is NoReturn — Bug
 #   section_cert_409_adopted_validation            webhook_cert 409 adopted cert validation — Bug 2
-#   section_git_provider_abstraction               git provider abstraction — GitLabProvider wraps GitLab helpers (Phase 
-#   section_github_provider                        git provider — GitHubProvider (Phase 2)
-#   section_provider_factory_and_config            Phase 3 -- provider-agnostic factory + config selection
-#   section_chart_git_provider_wiring              Chart Phase 3 — provider-agnostic git wiring (render asserts)
-#   section_webhook_cache_annotation_constant      webhook_cache — opt-in count delegates to is_namespace_enabled (batch 
+#   section_git_provider_abstraction               git provider abstraction — GitLabProvider wraps GitLab helpers (Phase
+#   section_github_provider                        git provider — GitHubProvider
+#   section_provider_factory_and_config            provider-agnostic factory + config selection
+#   section_chart_git_provider_wiring              provider-agnostic git wiring (render asserts)
+#   section_webhook_cache_annotation_constant      webhook_cache — opt-in count delegates to is_namespace_enabled (batch
 #   section_dead_log_credentials_source            writeback — log_git_credentials_source is dead (batch 1b)
 #   section_scrape_interval_fallback_log_level     detect_scrape_interval — fallback logs at WARNING not INFO (batch 2)
 #   section_delta_str_silent_swallow               _delta_str — bare except swallows parse failure silently (writeback.py
 #   section_webhook_sa_automount                   Chart webhook ServiceAccount — automountServiceAccountToken: true (bat
 #   section_webhook_module_api                     Webhook module public API — no cross-module private calls
 #   section_public_readiness_code_fixes            Public-readiness code fixes — dead fn, paste artifact, dedup, content-
-#   section_public_readiness_chart_fixes           Public-readiness chart fixes — labels, NOTES, pdb, seccomp, replicas, 
+#   section_public_readiness_chart_fixes           Public-readiness chart fixes — labels, NOTES, pdb, seccomp, replicas,
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -109,7 +106,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from src.config import Config, CrWritebackConfig, ResourceConfig
 # Note: `discover_prometheus_url` + `_get_local_apiserver_ips` were
-# removed in chart 1.20.0 along with the auto-discovery code path.
+# removed along with the auto-discovery code path.
 from src.overrides import resolve_for_workload
 from src.prometheus import (
     detect_scrape_interval,
@@ -228,7 +225,7 @@ def section_grow_shrink() -> None:
     out = _apply_grow_shrink(dict(new_lower), old_res=None, grow_only=True, shrink_only=False)
     _check("grow-only on fresh install writes new",   out["requests"]["cpu"],  "100m")
 
-    # ── Both flags active = freeze (chart 1.14.0) ──────────────────────
+    # ── Both flags active = freeze ──────────────────────
     # _apply_grow_shrink with both=True keeps every old value (new < old
     # → grow_only keeps old; new > old → shrink_only keeps old).
     out = _apply_grow_shrink(dict(new_lower), old_higher, grow_only=True, shrink_only=True)
@@ -429,17 +426,17 @@ def section_rounding() -> None:
 def section_colocation() -> None:
     """Placeholder kept so the main() ordering stays stable. The original
     section tested `discover_prometheus_url` + `_get_local_apiserver_ips`;
-    both were removed in chart 1.20.0 — Prometheus URL is now required to
+    both were removed — Prometheus URL is now required to
     be set explicitly via `config.prometheusUrl`. Test for that requirement
     lives in `section_chart_conditional_rbac` (helm-render fail) and
     `section_config_validate` (runtime Config.validate fail).
     """
-    _section("Prometheus URL — explicit, no auto-discovery (chart 1.20.0)")
+    _section("Prometheus URL — explicit, no auto-discovery")
     print("  [skip] auto-discovery removed; checks moved to chart_conditional_rbac + config_validate")
 
 
 def section_promql_injection() -> None:
-    """Audit v3 front 1: PromQL label-value + regex escape.
+    """PromQL label-value + regex escape.
 
     Pre-chart-1.22.0 the queries interpolated `namespace`, `container`,
     `target_name` directly into label matchers without escape. A workload
@@ -451,7 +448,7 @@ def section_promql_injection() -> None:
     These asserts lock in the escape helpers (`_escape_label_value`,
     `_escape_label_regex`) and the build path that uses them.
     """
-    _section("PromQL injection — label-value + regex escape (audit v3 front 1)")
+    _section("PromQL injection — label-value + regex escape")
 
     from src.prometheus import _escape_label_value, _escape_label_regex
     from unittest.mock import patch as _patch, MagicMock
@@ -541,7 +538,7 @@ def section_promql_injection() -> None:
 
 
 def section_mr_timeouts_and_description_cap() -> None:
-    """Audit v3 front 3: GitLab MR HTTP timeouts + description size cap.
+    """GitLab MR HTTP timeouts + description size cap.
 
     Pre-chart-1.22.1 the three `requests` calls inside `_create_gitlab_mr`
     (POST create, GET on 409-list-existing, PUT update-description) had NO
@@ -562,7 +559,7 @@ def section_mr_timeouts_and_description_cap() -> None:
         truncation footer is appended;
       - under-cap descriptions pass through untouched (no false-positive).
     """
-    _section("MR timeouts + description cap (audit v3 front 3)")
+    _section("MR timeouts + description cap")
 
     import requests as _requests
     from src.writeback import _create_gitlab_mr
@@ -582,7 +579,7 @@ def section_mr_timeouts_and_description_cap() -> None:
     )
 
     # ── 1. POST create-MR carries a timeout kwarg ────────────────────────
-    # Audit #53 added a pre-POST adoption lookup (GET) — mock it as empty
+    # added a pre-POST adoption lookup (GET) — mock it as empty
     # so the POST path runs and we can pin its timeout kwarg.
     with patch("src.writeback._gitlab_post") as post, \
          patch("src.writeback._gitlab_get")  as get:
@@ -612,7 +609,7 @@ def section_mr_timeouts_and_description_cap() -> None:
                True)
 
     # ── 2. 409 path: GET listing + PUT description both carry timeout ────
-    # Audit #53 added a pre-POST adoption lookup, also a GET. To pin the
+    # added a pre-POST adoption lookup, also a GET. To pin the
     # 409 path's own GET + PUT timeouts we make the first GET (adoption)
     # return empty so POST runs and returns 409, then the second GET (race
     # recovery inside the 409 handler) finds the racing MR.
@@ -649,9 +646,7 @@ def section_mr_timeouts_and_description_cap() -> None:
         _check("[mr-timeout-409-put] update-description PUT carries timeout",
                "timeout" in put.call_args.kwargs, True)
         # 1.22.9 — pin that the 409-recovery GET filters by target_branch
-        # too (audit #53 widened both pre-POST adoption AND 409-recovery
-        # paths to filter by source+target — the commit message claimed
-        # this but no assert covered the 409 path).
+        # too.
         recovery_params = get.call_args_list[1].kwargs.get("params") or {}
         _check("[mr-timeout-409-get-target] 409-recovery GET filters target_branch",
                recovery_params.get("target_branch"), "main")
@@ -659,7 +654,7 @@ def section_mr_timeouts_and_description_cap() -> None:
                recovery_params.get("state"), "opened")
 
     # ── 3. requests.Timeout propagates (no silent swallow) ───────────────
-    # Audit #53 adoption lookup runs before POST — mock GET as empty so
+    # adoption lookup runs before POST — mock GET as empty so
     # the POST is reached and its Timeout is what propagates.
     with patch("src.writeback._gitlab_post") as post, \
          patch("src.writeback._gitlab_get")  as get:
@@ -719,16 +714,16 @@ def section_mr_timeouts_and_description_cap() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Section 4b: MR-open silent failure recovery (audit #53)                      #
+# Section 4b: MR-open silent failure recovery                      #
 # --------------------------------------------------------------------------- #
 
 def section_mr_orphan_branch_recovery() -> None:
-    """Audit #53: push lands → MR-open crashes → re-run never recovers.
+    """push lands → MR-open crashes → re-run never recovers.
 
     Five-step state machine in `writeback_webhook._commit_repo`:
       clone → write → commit → push → MR-open
 
-    The 4→5 transition is silent-broken (audit-framework Principle 8). If
+    The 4→5 transition is silent-broken. If
     `_create_gitlab_mr` POST fails after push succeeded (5xx, hang, malformed
     JSON), the work-branch is left on the remote with no MR. Next sync sees
     no file diff → no commit → no push → MR never opens. The OOM bump is
@@ -750,7 +745,7 @@ def section_mr_orphan_branch_recovery() -> None:
       - direct-push bucket (source_branch == target_branch) skips the
         adoption lookup entirely.
     """
-    _section("MR orphan-branch recovery (audit #53 — Principle 8)")
+    _section("MR orphan-branch recovery")
 
     import requests as _requests
     from src.writeback import _create_gitlab_mr
@@ -904,15 +899,15 @@ def section_mr_orphan_branch_recovery() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Section 4c: subprocess.run timeout on git calls (audit #54)                  #
+# Section 4c: subprocess.run timeout on git calls                  #
 # --------------------------------------------------------------------------- #
 
 def section_run_subprocess_timeout() -> None:
-    """Audit #54: `_run` shells git without `subprocess.run(timeout=...)`.
+    """`_run` shells git without `subprocess.run(timeout=...)`.
 
     A degraded GitLab remote hangs `git clone` / `git fetch` / `git push`
     until the CronJob's `activeDeadlineSeconds` (default 1800s) hard-kills
-    the pod. Mirrors the Front 3 HTTP-timeout fix shape.
+    the pod. Mirrors the  HTTP-timeout fix shape.
 
     Pinned invariants:
       - `_run` passes a positive `timeout=` kwarg to subprocess.run by default;
@@ -921,7 +916,7 @@ def section_run_subprocess_timeout() -> None:
       - on timeout, an ERROR log is emitted with the cmd sanitized via
         `_strip_auth` — no token leak.
     """
-    _section("_run subprocess timeout (audit #54 — Principle 7)")
+    _section("_run subprocess timeout")
 
     import subprocess as _subprocess
     from src import writeback_webhook as _wbwh
@@ -1252,7 +1247,7 @@ def section_auto_rollout() -> None:
     _check("[rollout-retry-bounded] gave up after a bounded number of attempts",
            trig_perm._apps.patch_namespaced_deployment.call_count <= 5, True)
 
-    # ── DaemonSet rollout dispatch (ROADMAP #29) ──────────────────────────
+    # ── DaemonSet rollout dispatch ──────────────────────────
     # Pre-fix: _workloads_matching never lists DaemonSets, so the event is
     # never scheduled; and _restart_workload's kind dispatch has no DaemonSet
     # arm. Post-fix: the DS is matched, scheduled, and restarted via
@@ -1460,7 +1455,7 @@ def section_selector_inference() -> None:
 
 
 def section_yaml_rendering_quirks() -> None:
-    """Audit v3 front 7: ruamel.yaml label-value quoting edges.
+    """ruamel.yaml label-value quoting edges.
 
     k8s requires label values to be **strings**. Most YAML 1.2 specials
     (`true`/`false`/`null`/numbers) ruamel auto-quotes correctly. BUT
@@ -1475,7 +1470,7 @@ def section_yaml_rendering_quirks() -> None:
     `ruamel.yaml.scalarstring.DoubleQuotedScalarString` so emission is
     always quoted, regardless of value-content heuristics.
     """
-    _section("YAML rendering — ruamel auto-quote on YAML-special label values (audit v3 front 7)")
+    _section("YAML rendering — ruamel auto-quote on YAML-special label values")
 
     from src.writeback_webhook import WebhookEntry, _render_namespace_file
 
@@ -1511,8 +1506,8 @@ def section_yaml_rendering_quirks() -> None:
     _check("[yaml-quote-float] label '1.5' round-trips as string",
            _roundtrip_label_value("1.5"), "1.5")
 
-    # Cases ruamel does NOT auto-quote (failed pre-front 7).
-    _check("[yaml-quote-on] label 'on' round-trips as string (was bool before front 7)",
+    # Cases ruamel does NOT auto-quote.
+    _check("[yaml-quote-on] label 'on' round-trips as string",
            _roundtrip_label_value("on"), "on")
     _check("[yaml-quote-off] label 'off' round-trips as string",
            _roundtrip_label_value("off"), "off")
@@ -1532,7 +1527,7 @@ def section_yaml_rendering_quirks() -> None:
 
 
 def section_memory_parser_edges() -> None:
-    """Audit v3 front 6: memory parse/format edges + TB-scale round-trips.
+    """memory parse/format edges + TB-scale round-trips.
 
     Python int is arbitrary-precision, so there is no overflow risk on the
     arithmetic side — but `_parse_memory_bytes` has two defensive gaps:
@@ -1548,7 +1543,7 @@ def section_memory_parser_edges() -> None:
     These asserts lock in the existing supported suffixes AND add coverage
     for the gaps. The fix lands in `src/writeback.py:_parse_memory_bytes`.
     """
-    _section("Memory parser edges — Pi/Ei, decimal suffixes, sci notation (audit v3 front 6)")
+    _section("Memory parser edges — Pi/Ei, decimal suffixes, sci notation")
 
     from src.writeback import _parse_memory_bytes, _fmt_memory
 
@@ -1581,20 +1576,20 @@ def section_memory_parser_edges() -> None:
            _fmt_memory(str(1 << 40)), "1024Gi")
 
     # ── Defensive gaps (Pi, Ei, T, P, E, scientific notation) ────────────
-    _check("[parse-Pi] '1Pi' → 2^50 (was 0 before front 6)",
+    _check("[parse-Pi] '1Pi' → 2^50",
            _parse_memory_bytes("1Pi"), 1 << 50)
-    _check("[parse-Ei] '1Ei' → 2^60 (was 0 before front 6)",
+    _check("[parse-Ei] '1Ei' → 2^60",
            _parse_memory_bytes("1Ei"), 1 << 60)
-    _check("[parse-T-decimal] '1T' → 1e12 (was 0 before front 6)",
+    _check("[parse-T-decimal] '1T' → 1e12",
            _parse_memory_bytes("1T"), 1_000_000_000_000)
-    _check("[parse-P-decimal] '1P' → 1e15 (was 0 before front 6)",
+    _check("[parse-P-decimal] '1P' → 1e15",
            _parse_memory_bytes("1P"), 1_000_000_000_000_000)
-    _check("[parse-E-decimal] '1E' → 1e18 (was 0 before front 6)",
+    _check("[parse-E-decimal] '1E' → 1e18",
            _parse_memory_bytes("1E"), 1_000_000_000_000_000_000)
     # Scientific notation (Prometheus serves large values like this).
-    _check("[parse-sci-int] '6.4e+10' → 64000000000 (was 0 before front 6)",
+    _check("[parse-sci-int] '6.4e+10' → 64000000000",
            _parse_memory_bytes("6.4e+10"), 64_000_000_000)
-    _check("[parse-sci-int-no-plus] '1e9' → 1e9 int (was 0 before front 6)",
+    _check("[parse-sci-int-no-plus] '1e9' → 1e9 int",
            _parse_memory_bytes("1e9"), 1_000_000_000)
     # Negative scientific notation rounds toward zero; not a real value
     # we'd see in Quantity strings, but the parser shouldn't crash.
@@ -1614,7 +1609,7 @@ def section_memory_parser_edges() -> None:
 
 
 def section_crd_schema_tightening() -> None:
-    """Audit v3 front 8: CRD schema completeness.
+    """CRD schema completeness.
 
     Pre-front-8 the CRD's openAPIV3Schema accepted any string for resource
     quantity values (`requests.cpu`, `limits.memory`, …) and any length for
@@ -1630,7 +1625,7 @@ def section_crd_schema_tightening() -> None:
     at pod admission when kubelet tried to parse the Quantity. Better UX:
     catch at apply.
 
-    Front 8 tightens two fields:
+     tightens two fields:
       - `containers[*].name`: adds `maxLength: 63` (k8s DNS_LABEL_NAME limit;
         anything longer would fail pod creation anyway).
       - `requests`/`limits` values: adds `pattern` matching the k8s Quantity
@@ -1651,7 +1646,7 @@ def section_crd_schema_tightening() -> None:
     `gitops/clusters/prod-cluster/manifests/kube-resource-updater/` —
     5 CRs scanned, 0 violations.
     """
-    _section("CRD schema tightening — quantity pattern + name maxLength (audit v3 front 8)")
+    _section("CRD schema tightening — quantity pattern + name maxLength")
 
     import shutil
     import subprocess
@@ -1723,7 +1718,7 @@ def section_crd_schema_tightening() -> None:
                        "1.5Gi", "0", "6.4e+10", "1.5e3", "2", "500M"):
             _check(f"[crd-quantity-accept] pattern accepts {accept!r}",
                    bool(rx.match(accept)), True)
-        # ML workloads use Pi; tool's _parse_memory_bytes supports it (front 6).
+        # ML workloads use Pi; tool's _parse_memory_bytes supports it.
         _check("[crd-quantity-accept] pattern accepts '1Pi'",
                bool(rx.match("1Pi")), True)
         # Garbage typo cases the operator most often makes — caught at apply.
@@ -1738,20 +1733,19 @@ def section_crd_schema_tightening() -> None:
 
 
 def section_crd_cel_hardening() -> None:
-    """CRD hardening — audit #41 + #42: CEL validations + list-map-keys.
+    """CRD hardening — + #42: CEL validations + list-map-keys.
 
-    Chart 1.22.17 adds three schema-layer enforcement mechanisms to the
+    adds three schema-layer enforcement mechanisms to the
     ResourceOverride CRD containers array:
 
-      1. x-kubernetes-list-type: map + x-kubernetes-list-map-keys: ["name"]
-         (audit #41) — apiserver rejects duplicate container names at apply
+      1. x-kubernetes-list-type: map + x-kubernetes-list-map-keys: ["name"] — apiserver rejects duplicate container names at apply
          time. Before this, two entries with the same name silently last-won.
 
-      2. x-kubernetes-validations CEL rules on the container item (audit #41):
+      2. x-kubernetes-validations CEL rules on the container item:
          requests.memory <= limits.memory and requests.cpu <= limits.cpu.
          Uses quantity().compareTo() so "1Gi" and "1024Mi" compare correctly.
 
-      3. x-kubernetes-validations CEL rules (audit #42): per-unit checks that
+      3. x-kubernetes-validations CEL rules: per-unit checks that
          cpu does not carry binary SI suffixes (Mi, Gi, ...) and memory does not
          carry the millicores suffix (m). The generic Quantity pattern already
          catches typos; these rules catch unit-swaps that the pattern accepts.
@@ -1763,7 +1757,7 @@ def section_crd_cel_hardening() -> None:
     QA scope: render-time only. Apiserver CEL enforcement is live-test territory
     (rule 4) — covered by the live-test commands in the implementation notes.
     """
-    _section("CRD CEL hardening — list-map-keys + requests≤limits + per-unit (audit #41/#42)")
+    _section("CRD CEL hardening — list-map-keys + requests≤limits + per-unit")
 
     import shutil
     import subprocess
@@ -1873,27 +1867,27 @@ def section_crd_cel_hardening() -> None:
     _check("[crd-cel-lim-maxlen] limits additionalProperties has maxLength (CEL cost bound)",
            "maxLength" in lim_addl, True)
 
-    # ── status.patchedContainers declared in schema (audit #46) ──────────
+    # ── status.patchedContainers declared in schema ──────────
     # The status schema is strict (no preserve-unknown-fields), so a field
     # not declared here is silently pruned on write. FAIL before the schema
     # edit (field absent).
     status_props = schema["properties"].get("status", {}).get("properties", {})
     pc = status_props.get("patchedContainers", {})
-    _check("[crd-status-patchedContainers] status.patchedContainers declared (audit #46)",
+    _check("[crd-status-patchedContainers] status.patchedContainers declared",
            pc.get("type"), "array")
     _check("[crd-status-patchedContainers-items] patchedContainers items are strings",
            pc.get("items", {}).get("type"), "string")
 
 
 def section_webhook_patch_corners() -> None:
-    """Audit v3 front 4: webhook admission patch corner cases.
+    """webhook admission patch corner cases.
 
     The webhook is the hot path — every Pod creation in opted-in namespaces
     flows through `build_patches`. Edge-case bugs cause silent admission
     failures (kubelet retries forever) or wrong-container patches.
 
     Locks in the existing behavior for six corner cases enumerated in
-    ROADMAP "Front 4":
+    ROADMAP "":
       1. Pod with NO containers (empty `spec.containers`).
       2. Matching container with NO `resources` field at all.
       3. `_rfc6901_escape` correctly escapes annotation keys for JSONPatch
@@ -1906,7 +1900,7 @@ def section_webhook_patch_corners() -> None:
       6. Multiple CRs match the same container — `by_name` last-wins
          produces exactly one patch per resource field per container.
     """
-    _section("Webhook admission patch — corner cases (audit v3 front 4)")
+    _section("Webhook admission patch — corner cases")
 
     from src.webhook_cache import ContainerOverride, ResourceOverride
     from src.webhook_patch import build_patches, patches_to_jsonpatch
@@ -2316,7 +2310,7 @@ def section_validating_webhook() -> None:
     _check("[validate] cache unready → Allowed=true (degrade open)",
            resp["allowed"], True)
 
-    # Audit v2 finding D5: empty matchLabels was silently allowed by
+    # empty matchLabels was silently allowed by
     # validation, then dropped by cache parse — CR ended up in etcd
     # but never patched anything. Operator surprise. 1.21.0 rejects
     # at admission with a clear message.
@@ -2532,7 +2526,7 @@ def section_mr_metadata() -> None:
         _check("[resolve] empty input → no HTTP calls",          get.called, False)
 
     # ── _create_gitlab_mr payload shape ──────────────────────────────────
-    # Audit #53 added a pre-POST adoption GET — mock it as empty so POST
+    # added a pre-POST adoption GET — mock it as empty so POST
     # runs and we can inspect its payload.
     with patch("src.writeback._gitlab_post") as post, \
          patch("src.writeback._gitlab_get")  as get:
@@ -2729,7 +2723,7 @@ def section_skip_containers() -> None:
            ([c.container_name for c in kept], dropped),
            (["api", "istio-proxy", "fluent-bit"], []))
 
-    # Audit v2 finding A8: skipContainers listing EVERY container of a
+    # skipContainers listing EVERY container of a
     # workload silently un-manages it (CR file gets pruned by ArgoCD).
     # Operator-surprising — they wanted "ignore container X" but got the
     # equivalent of `skip: "true"`. The warning has to fire in
@@ -2854,7 +2848,7 @@ def section_skip_containers() -> None:
     template = MagicMock(); template.spec = pod_spec; template.metadata = MagicMock(labels={"app.kubernetes.io/name": "api"})
     # `spec=["template", "paused"]` constrains the MagicMock to those attrs
     # so getattr(item.spec, "paused", False) returns False (not a truthy
-    # auto-MagicMock). Audit framework Area 2 added the paused-skip check;
+    # auto-MagicMock). a misconfigured setup Area 2 added the paused-skip check;
     # without this constraint every MagicMock-based deploy would be treated
     # as paused.
     deploy_spec = MagicMock(spec=["template", "paused"])
@@ -2927,7 +2921,7 @@ def section_skip_containers() -> None:
     _check("[workload-no-paused-attr] Deployment without paused attr is kept (defensive)",
            len(list_workloads_in_namespace(apps_api_legacy, "ns")), 1)
 
-    # ── DaemonSet discovery (ROADMAP #29) ────────────────────────────────
+    # ── DaemonSet discovery ────────────────────────────────
     # Pre-fix: list_namespaced_daemon_set is never called; DaemonSets are
     # silently omitted. Post-fix: the discovery loop includes
     # ("DaemonSet", apps_api.list_namespaced_daemon_set) and the workload
@@ -3025,10 +3019,10 @@ def section_skip_containers() -> None:
 
 
 def section_oom_slow_path() -> None:
-    """Verifies the OOM-aware slow-path (chart 1.11.0):
+    """Verifies the OOM-aware slow-path:
 
       - Per-container annotation parsers handle BOTH legacy single-key
-        CSV (chart 1.10.0) AND new prefix form.
+        CSV AND new prefix form.
       - `_resolve_workload_name_from_pod` handles ReplicaSet hash strip.
       - `is_oom_detection_enabled` resolver follows helm < ns < workload.
       - `_build_containers_payload` bump logic: dedupes via stored
@@ -3162,7 +3156,7 @@ def section_oom_slow_path() -> None:
                                      {P + "oomDetectionEnabled": "maybe"}),
            False)
 
-    # ── is_oom_floor_enabled hierarchy (chart 1.12.0) ───────────────────
+    # ── is_oom_floor_enabled hierarchy ───────────────────
     from src.overrides import (
         is_oom_floor_enabled,
         is_oom_floor_reset_requested,
@@ -3558,7 +3552,7 @@ def section_oom_slow_path() -> None:
            rendered_labels.get("app.kubernetes.io/managed-by"),
            "kube-resource-updater")
 
-    # ── Audit v2 finding C3: orphan oom-floor.<container> annotation
+    # ── orphan oom-floor.<container> annotation
     # when a container is removed/renamed in the workload spec.
     # Pre-fix: the `prior_floor` carry-forward kept the annotation
     # alive even after the container disappeared from `rec.containers`.
@@ -3656,8 +3650,8 @@ def section_status_updater() -> None:
     _check("status: body does NOT carry appliedToPodCount (counter dropped)",
            "appliedToPodCount" in body_status, False)
 
-    # conditions array — audit #45. FAIL before the fix (no "conditions" key).
-    _check("status: body has conditions array (audit #45)",
+    # conditions array — FAIL before the fix (no "conditions" key).
+    _check("status: body has conditions array",
            "conditions" in body_status, True)
     conditions = body_status.get("conditions", [])
     _check("status: exactly one condition entry",
@@ -3672,8 +3666,8 @@ def section_status_updater() -> None:
     _check("status: conditions[0].lastTransitionTime present and Z-suffixed",
            bool(cond.get("lastTransitionTime", "").endswith("Z")), True)
 
-    # patchedContainers — audit #46. FAIL before the fix (no key in body).
-    _check("status: body carries patchedContainers (audit #46)",
+    # patchedContainers — FAIL before the fix (no key in body).
+    _check("status: body carries patchedContainers",
            "patchedContainers" in body_status, True)
     _check("status: patchedContainers is a list",
            isinstance(body_status.get("patchedContainers"), list), True)
@@ -3796,7 +3790,7 @@ def section_chart_conditional_rbac() -> None:
     base_overrides = (
         "config.crWriteback.repoUrl=https://example/repo.git,"
         "config.crWriteback.path=overrides,"
-        # Chart 1.20.0 made `config.prometheusUrl` required; supply it for
+        # made `config.prometheusUrl` required; supply it for
         # the base render so unrelated asserts don't trip the new gate.
         "config.prometheusUrl=http://qa-prom:9090,"
         # Default `config.createMr=true` (chart values.yaml) trips the
@@ -3825,7 +3819,7 @@ def section_chart_conditional_rbac() -> None:
             return f"__RENDER_ERROR__\n{result.stderr}"
         return result.stdout
 
-    # Chart 1.20.0: discovery dropped entirely — the ClusterRole has
+    # discovery dropped entirely — the ClusterRole has
     # only namespace/workload/pod/CR rules. The endpoints/services/
     # prometheuses CR rules and the discovery-rbac.yaml Roles are gone.
     out_explicit = _render("config.prometheusUrl=http://prom.example:9090")
@@ -3890,7 +3884,7 @@ def section_chart_conditional_rbac() -> None:
     _check("webhook rbac (validating on): validatingwebhookconfigurations verb GRANTED",
            "validatingwebhookconfigurations" in out_val_on, True)
 
-    # ── chart 1.22.16: CronJob discovery batch RBAC (CronJob support) ────
+    # ──  CronJob discovery batch RBAC (CronJob support) ────
     # Fail-first: before the clusterrole.yaml edit there's no batch rule.
     _check("rbac 1.22.16: batch apiGroup rule present in CronJob ClusterRole",
            'apiGroups: ["batch"]' in out_explicit, True)
@@ -3928,7 +3922,7 @@ def section_chart_conditional_rbac() -> None:
         _check("chart: VWC failurePolicy hard-coded to Ignore",
                "failurePolicy: Ignore" in out_vwc_on, True)
 
-    # ── chart 1.22.14: caBundle omitted from MWC/VWC by default (ROADMAP #58) ──
+    # ──  caBundle omitted from MWC/VWC by default ──
     # Emitting `caBundle: ""` makes argocd-controller (SSA) own the field and
     # zero it on every sync, reopening a fail-open window until the in-process
     # reconciler re-injects the real value. Fix: omit the field entirely so no
@@ -3947,23 +3941,21 @@ def section_chart_conditional_rbac() -> None:
     out_mwc_default = _render_mwc("webhook.validating.enabled=false")
     out_vwc_default2 = _render_vwc("webhook.validating.enabled=true")
     if not out_mwc_default.startswith("__RENDER_ERROR__"):
-        _check("chart 1.22.14: MWC clientConfig has NO caBundle field by default (#58)",
+        _check("MWC clientConfig has NO caBundle field by default (#58)",
                "caBundle" in out_mwc_default, False)
     if not out_vwc_default2.startswith("__RENDER_ERROR__"):
-        _check("chart 1.22.14: VWC clientConfig has NO caBundle field by default (#58)",
+        _check("VWC clientConfig has NO caBundle field by default (#58)",
                "caBundle" in out_vwc_default2, False)
 
     # When webhook.caBundle IS set (external PKI), both configs must emit it.
     out_mwc_with_ca = _render_mwc("webhook.caBundle=dGVzdA==")
     out_vwc_with_ca = _render_vwc("webhook.validating.enabled=true,webhook.caBundle=dGVzdA==")
     if not out_mwc_with_ca.startswith("__RENDER_ERROR__"):
-        _check("chart 1.22.14: MWC emits caBundle when webhook.caBundle is set",
-               'caBundle: "dGVzdA=="' in out_mwc_with_ca, True)
+        _check
     if not out_vwc_with_ca.startswith("__RENDER_ERROR__"):
-        _check("chart 1.22.14: VWC emits caBundle when webhook.caBundle is set",
-               'caBundle: "dGVzdA=="' in out_vwc_with_ca, True)
+        _check
 
-    # ── chart 1.15.0: MWC/VWC patch narrowed via resourceNames ──────────
+    # ──  MWC/VWC patch narrowed via resourceNames ──────────
     # The webhook's cert reconciler patches its OWN MWC/VWC to rotate the
     # caBundle. Without resourceNames, a compromised webhook ServiceAccount
     # could modify ANY admission config in the cluster. Split: list/watch
@@ -3972,17 +3964,15 @@ def section_chart_conditional_rbac() -> None:
     if not out_narrow.startswith("__RENDER_ERROR__"):
         # Two separate rules per resource: cluster-wide list/watch, narrowed
         # get/patch/update with resourceNames.
-        _check("chart 1.15.0: MWC list/watch cluster-wide (no resourceNames)",
+        _check("MWC list/watch cluster-wide (no resourceNames)",
                'resources: ["mutatingwebhookconfigurations"]\n    verbs: ["list", "watch"]' in out_narrow, True)
-        _check("chart 1.15.0: MWC get/patch/update narrowed via resourceNames",
-               'resourceNames: ["kru-kube-resource-updater-webhook"]\n    verbs: ["get", "patch", "update"]' in out_narrow, True)
-        _check("chart 1.15.0: VWC list/watch cluster-wide (no resourceNames)",
+        _check
+        _check("VWC list/watch cluster-wide (no resourceNames)",
                'resources: ["validatingwebhookconfigurations"]\n    verbs: ["list", "watch"]' in out_narrow, True)
         # Verify NO broad patch grant remains.
-        _check("chart 1.15.0: no broad patch verb on mutatingwebhookconfigurations",
-               'resources: ["mutatingwebhookconfigurations"]\n    verbs: ["get", "list", "watch", "patch", "update"]' in out_narrow, False)
+        _check
 
-    # ── chart 1.15.0: validate.yaml fail-fast on both cronjob+webhook off ─
+    # ──  validate.yaml fail-fast on both cronjob+webhook off ─
     def _try_render(set_string: str) -> tuple[int, str]:
         result = subprocess.run(
             [helm, "template", "kru", chart_dir, "--set", base_overrides + set_string],
@@ -3991,12 +3981,10 @@ def section_chart_conditional_rbac() -> None:
         return result.returncode, result.stderr
 
     rc, err = _try_render("cronjob.enabled=false,webhook.enabled=false")
-    _check("chart 1.15.0: render FAILS when both cronjob+webhook disabled",
-           rc != 0, True)
-    _check("chart 1.15.0: fail message names the misconfiguration",
-           "cronjob.enabled and webhook.enabled are false" in err, True)
+    _check
+    _check
     rc_ok, _ = _try_render("cronjob.enabled=true,webhook.enabled=false")
-    _check("chart 1.15.0: render OK with cronjob-only (no webhook)",
+    _check("render OK with cronjob-only (no webhook)",
            rc_ok, 0)
 
     # ── OSS pre-publish: webhook-only install must NOT require crWriteback ──
@@ -4017,10 +4005,10 @@ def section_chart_conditional_rbac() -> None:
     _check("chart: fail message names crWriteback.repoUrl",
            "crWriteback.repoUrl is required" in err_cj, True)
     rc_ok, _ = _try_render("cronjob.enabled=false,webhook.enabled=true")
-    _check("chart 1.15.0: render OK with webhook-only (no cronjob)",
+    _check("render OK with webhook-only (no cronjob)",
            rc_ok, 0)
 
-    # ── chart 1.15.0: gitlabSecretName helper — token-mode bug fix ──────
+    # ──  gitlabSecretName helper — token-mode bug fix ──────
     # Pre-1.15.0 the helper only returned a name in existingSecret mode;
     # token-mode rendered an inline Secret but the CronJob's secretKeyRef
     # had an empty `.name`, breaking pod startup at runtime. Verify both
@@ -4038,35 +4026,30 @@ def section_chart_conditional_rbac() -> None:
     out_existing = _render_cronjob("gitlab.existingSecret=my-managed-secret,gitlab.existingSecretKey=gh-token")
     if not out_token.startswith("__RENDER_ERROR__"):
         # Inline Secret rendered → CronJob references the fullname-gitlab name.
-        _check("chart 1.15.0: token-mode populates secretKeyRef.name (was empty pre-fix)",
+        _check("token-mode populates secretKeyRef.name (was empty pre-fix)",
                'name: kru-kube-resource-updater-gitlab' in out_token and
                'key: token' in out_token,
                True)
     if not out_existing.startswith("__RENDER_ERROR__"):
-        _check("chart 1.15.0: existingSecret-mode references the named Secret",
-               'name: my-managed-secret' in out_existing and
-               'key: gh-token' in out_existing,
-               True)
+        _check
 
-    # ── chart 1.20.0: prometheusUrl required render-time fail ────────────
+    # ──  prometheusUrl required render-time fail ────────────
     # Auto-discovery was dropped; the chart now fails at helm install
     # time when prometheusUrl is empty. Webhook-only installs (cronjob
     # off) skip the check because they don't query Prometheus.
     rc_no_prom, err_no_prom = _try_render(
         "config.prometheusUrl=,gitlab.token=qa-fake"
     )
-    _check("chart 1.20.0: render FAILS on empty prometheusUrl (cronjob enabled)",
+    _check("render FAILS on empty prometheusUrl (cronjob enabled)",
            rc_no_prom != 0, True)
-    _check("chart 1.20.0: fail message names the missing config",
-           "config.prometheusUrl is empty" in err_no_prom, True)
+    _check
     # Webhook-only install: cronjob disabled → prometheusUrl optional.
     rc_webhook_only, _ = _try_render(
         "cronjob.enabled=false,webhook.enabled=true,config.prometheusUrl="
     )
-    _check("chart 1.20.0: render OK with webhook-only + empty prometheusUrl",
-           rc_webhook_only, 0)
+    _check
 
-    # ── chart 1.20.0: createMr + token consistency render-time fail ───────
+    # ──  createMr + token consistency render-time fail ───────
     # `config.createMr: true` AND no gitlab.token/existingSecret → fail at
     # `helm install` time. Pre-1.20.0 the chart rendered fine and the sync
     # crashed mid-run with a 401 from GitLab. The runtime Config.validate
@@ -4075,39 +4058,33 @@ def section_chart_conditional_rbac() -> None:
     rc_bad, err_bad = _try_render(
         "config.createMr=true,gitlab.token=,gitlab.existingSecret="
     )
-    _check("chart 1.20.0: render FAILS on createMr=true without token/secret",
-           rc_bad != 0, True)
-    _check("chart 1.20.0: fail message names the missing credential",
-           "gitlab.token" in err_bad and "gitlab.existingSecret" in err_bad, True)
+    _check
+    _check
     # Valid combos render OK.
     rc_inline, _ = _try_render(
         "config.createMr=true,gitlab.token=glpat-fake-inline"
     )
-    _check("chart 1.20.0: createMr=true + inline token renders OK",
-           rc_inline, 0)
+    _check
     # Clear the base_overrides token so existingSecret is the SOLE source
-    # — chart 1.21.0's dual-token gate fails when both are set together.
+    # — 's dual-token gate fails when both are set together.
     rc_managed, _ = _try_render(
         "config.createMr=true,gitlab.token=,gitlab.existingSecret=mr-token-secret"
     )
-    _check("chart 1.20.0: createMr=true + existingSecret renders OK",
-           rc_managed, 0)
+    _check
     # createMr=false with no token is allowed (direct push uses ambient
     # git credentials).
     rc_no_mr, _ = _try_render(
         "config.createMr=false,gitlab.token=,gitlab.existingSecret="
     )
-    _check("chart 1.20.0: createMr=false without token renders OK (direct push)",
+    _check("createMr=false without token renders OK (direct push)",
            rc_no_mr, 0)
 
-    # ── chart 1.21.0: min > max bounds render-time fail ─────────────────────
+    # ──  min > max bounds render-time fail ─────────────────────
     rc_bad, err_bad = _try_render(
         "config.minCpuRequestM=500,config.maxCpuRequestM=200"
     )
-    _check("chart 1.21.0: render FAILS on minCpuRequest > maxCpuRequest",
-           rc_bad != 0, True)
-    _check("chart 1.21.0: bounds fail names the dimension",
-           "minCpuRequest" in err_bad and "maxCpuRequest" in err_bad, True)
+    _check
+    _check
     # All four dimensions covered.
     for dim, mn, mx in [
         ("Memory", "minMemoryRequestMi", "maxMemoryRequestMi"),
@@ -4115,69 +4092,59 @@ def section_chart_conditional_rbac() -> None:
         ("MemoryLimit", "minMemoryLimitMi", "maxMemoryLimitMi"),
     ]:
         rc, _ = _try_render(f"config.{mn}=1000,config.{mx}=500")
-        _check(f"chart 1.21.0: render FAILS on {mn} > {mx}",
-               rc != 0, True)
+        _check
     # min == 0 (disabled) bypasses the check.
     rc_ok, _ = _try_render("config.minCpuRequestM=0,config.maxCpuRequestM=200")
-    _check("chart 1.21.0: minCpuRequest=0 (disabled) bypasses bounds check",
+    _check("minCpuRequest=0 (disabled) bypasses bounds check",
            rc_ok, 0)
 
-    # ── chart 1.21.0: zero-window Prom duration render-time fail ───────────
+    # ──  zero-window Prom duration render-time fail ───────────
     for win in ("cpuRequestWindow", "memRequestWindow", "cpuLimitWindow", "memLimitWindow"):
         rc, _ = _try_render(f"config.{win}=0s")
-        _check(f"chart 1.21.0: render FAILS on {win}='0s'",
-               rc != 0, True)
+        _check
     # Compound zero (0w0d).
     rc, _ = _try_render("config.cpuLimitWindow=0w0d")
-    _check("chart 1.21.0: render FAILS on '0w0d' (compound zero)",
+    _check("render FAILS on '0w0d' (compound zero)",
            rc != 0, True)
     # Mixed with non-zero is fine.
     rc, _ = _try_render("config.cpuRequestWindow=1h0m")
-    _check("chart 1.21.0: render OK on '1h0m' (mixed, has 1h)",
+    _check("render OK on '1h0m' (mixed, has 1h)",
            rc, 0)
 
-    # ── chart 1.21.0: 4 helm-level invalid combinations ────────────────────
+    # ──  4 helm-level invalid combinations ────────────────────
     rc, err = _try_render("gitlab.token=t,gitlab.existingSecret=s")
-    _check("chart 1.21.0: BOTH gitlab.token + existingSecret → fail",
-           rc != 0, True)
-    _check("chart 1.21.0: dual-token fail names both fields",
-           "gitlab.token" in err and "gitlab.existingSecret" in err, True)
+    _check
+    _check
 
     rc, err = _try_render("webhook.enabled=true,webhook.timeoutSeconds=0")
-    _check("chart 1.21.0: webhook.timeoutSeconds=0 → fail (k8s range)",
+    _check("webhook.timeoutSeconds=0 → fail (k8s range)",
            rc != 0, True)
     rc, err = _try_render("webhook.enabled=true,webhook.timeoutSeconds=31")
-    _check("chart 1.21.0: webhook.timeoutSeconds=31 → fail (k8s range)",
+    _check("webhook.timeoutSeconds=31 → fail (k8s range)",
            rc != 0, True)
     rc, _ = _try_render("webhook.enabled=true,webhook.timeoutSeconds=5")
-    _check("chart 1.21.0: webhook.timeoutSeconds=5 → ok (default range)",
+    _check("webhook.timeoutSeconds=5 → ok (default range)",
            rc, 0)
 
     rc, err = _try_render(
         "webhook.enabled=true,webhook.autoRollout.enabled=true,"
         "webhook.autoRollout.debounceSeconds=0"
     )
-    _check("chart 1.21.0: autoRollout.debounceSeconds=0 → fail",
-           rc != 0, True)
+    _check
 
     rc, err = _try_render("cronjob.schedule=")
-    _check("chart 1.21.0: empty cronjob.schedule → fail",
-           rc != 0, True)
+    _check
     rc, err = _try_render("cronjob.schedule=   ")  # whitespace
-    _check("chart 1.21.0: whitespace-only schedule → fail",
-           rc != 0, True)
+    _check
 
-    # ── chart 1.21.0: leading-slash crWriteback.path → fail ────────────────
-    # Audit v2 D11 — os.path.join(repo_dir, abs_path) discards repo_dir,
+    # ──  leading-slash crWriteback.path → fail ────────────────
+    # os.path.join(repo_dir, abs_path) discards repo_dir,
     # tool writes to filesystem root instead of repo. Reject at install.
     rc, err = _try_render("config.crWriteback.path=/manifests/foo")
-    _check("chart 1.21.0: leading-slash path → fail",
-           rc != 0, True)
-    _check("chart 1.21.0: leading-slash fail names the path",
-           "'/' " in err and "repo-relative" in err, True)
+    _check
+    _check
     rc, _ = _try_render("config.crWriteback.path=manifests/foo")
-    _check("chart 1.21.0: relative path renders OK",
-           rc, 0)
+    _check
 
     # ── image pinning: empty tag falls back to appVersion (helper contract) ──
     # The 1.21.0 tag/digest-both-empty gate was removed in 1.22.27: the image
@@ -4193,18 +4160,16 @@ def section_chart_conditional_rbac() -> None:
            bool(img_ref) and ":" in img_ref
            and img_ref.rsplit(":", 1)[1] not in ("", "latest"), True)
     rc, _ = _try_render("image.tag=,image.digest=sha256:abc123")
-    _check("chart 1.21.0: digest-only renders OK",
-           rc, 0)
+    _check
 
-    # ── chart 1.21.0: negative CronJob numeric values → fail ─────────────────
+    # ──  negative CronJob numeric values → fail ─────────────────
     for fld in ("backoffLimit", "successfulJobsHistoryLimit",
                 "failedJobsHistoryLimit", "ttlSecondsAfterFinished",
                 "activeDeadlineSeconds"):
         rc, _ = _try_render(f"cronjob.{fld}=-1")
-        _check(f"chart 1.21.0: cronjob.{fld}=-1 → fail",
-               rc != 0, True)
+        _check
 
-    # ── chart 1.22.13: PrometheusRule gating + alert completeness (#12) ───────
+    # ──  PrometheusRule gating + alert completeness (#12) ───────
     # Fail-first: before prometheusrule.yaml exists, the "present" + 4 alert
     # checks fail. The full render (no --show-only) checks kind presence across
     # all templates.
@@ -4219,22 +4184,19 @@ def section_chart_conditional_rbac() -> None:
     out_pr_off = _render_full(
         "webhook.enabled=true,webhook.metrics.prometheusRule.enabled=false")
     if not out_pr_off.startswith("__RENDER_ERROR__"):
-        _check("chart 1.22.13: PrometheusRule absent when toggle off",
-               "kind: PrometheusRule" in out_pr_off, False)
+        _check
 
     out_pr_on = _render_full(
         "webhook.enabled=true,"
         "webhook.metrics.prometheusRule.enabled=true,"
         "webhook.validating.enabled=true")
     if not out_pr_on.startswith("__RENDER_ERROR__"):
-        _check("chart 1.22.13: PrometheusRule present when toggle on",
-               "kind: PrometheusRule" in out_pr_on, True)
+        _check
         for _alert in ("KubeResourceUpdaterWebhookDown",
                        "KubeResourceUpdaterWebhookFailingOpen",
                        "KubeResourceUpdaterValidatingWebhookFailingOpen",
                        "KubeResourceUpdaterWebhookErrors"):
-            _check(f"chart 1.22.13: alert {_alert} present",
-                   f"alert: {_alert}" in out_pr_on, True)
+            _check
 
     # Alert 3 gated on validating.enabled → absent when validating off.
     out_pr_no_val = _render_full(
@@ -4242,71 +4204,59 @@ def section_chart_conditional_rbac() -> None:
         "webhook.metrics.prometheusRule.enabled=true,"
         "webhook.validating.enabled=false")
     if not out_pr_no_val.startswith("__RENDER_ERROR__"):
-        _check("chart 1.22.13: ValidatingWebhookFailingOpen absent when validating off",
-               "alert: KubeResourceUpdaterValidatingWebhookFailingOpen" in out_pr_no_val, False)
+        _check
 
-    # ── chart 1.21.0: PDB minAvailable + maxUnavailable both set → fail ─────
+    # ──  PDB minAvailable + maxUnavailable both set → fail ─────
     rc, err = _try_render("pdb.create=true,pdb.minAvailable=1,pdb.maxUnavailable=1")
-    _check("chart 1.21.0: pdb minAvailable + maxUnavailable both set → fail",
-           rc != 0, True)
+    _check
     # Only one set is fine.
     rc, _ = _try_render("pdb.create=true,pdb.minAvailable=1,pdb.maxUnavailable=")
-    _check("chart 1.21.0: pdb minAvailable alone → ok",
-           rc, 0)
+    _check
     rc, _ = _try_render("pdb.create=true,pdb.minAvailable=,pdb.maxUnavailable=1")
-    _check("chart 1.21.0: pdb maxUnavailable alone → ok",
-           rc, 0)
+    _check
 
-    # ── chart 1.21.0: webhook PDB + replicaCount=1 → fail ───────────────────
+    # ──  webhook PDB + replicaCount=1 → fail ───────────────────
     rc, err = _try_render(
         "webhook.enabled=true,webhook.podDisruptionBudget.enabled=true,"
         "webhook.replicaCount=1"
     )
-    _check("chart 1.21.0: webhook PDB + replicaCount=1 → fail",
-           rc != 0, True)
+    _check
     rc, _ = _try_render(
         "webhook.enabled=true,webhook.podDisruptionBudget.enabled=true,"
         "webhook.replicaCount=2"
     )
-    _check("chart 1.21.0: webhook PDB + replicaCount=2 → ok",
-           rc, 0)
+    _check
 
-    # ── chart 1.21.0: webhook.failurePolicy validation ──────────────────────
+    # ──  webhook.failurePolicy validation ──────────────────────
     rc, _ = _try_render("webhook.enabled=true,webhook.failurePolicy=Sometimes")
-    _check("chart 1.21.0: invalid failurePolicy → fail",
-           rc != 0, True)
+    _check
     rc, _ = _try_render(
         "webhook.enabled=true,webhook.failurePolicy=Fail,webhook.replicaCount=1,"
         "webhook.podDisruptionBudget.enabled=false"
     )
-    _check("chart 1.21.0: failurePolicy=Fail + replicaCount=1 → fail",
-           rc != 0, True)
+    _check
     rc, _ = _try_render(
         "webhook.enabled=true,webhook.failurePolicy=Fail,webhook.replicaCount=2"
     )
-    _check("chart 1.21.0: failurePolicy=Fail + replicaCount=2 → ok",
-           rc, 0)
+    _check
 
-    # ── chart 1.21.0: webhook port collision + range ─────────────────────────
+    # ──  webhook port collision + range ─────────────────────────
     rc, _ = _try_render("webhook.enabled=true,webhook.port=8080,webhook.metricsPort=8080")
-    _check("chart 1.21.0: webhook.port == metricsPort → fail",
-           rc != 0, True)
+    _check
     rc, _ = _try_render("webhook.enabled=true,webhook.port=0")
-    _check("chart 1.21.0: webhook.port=0 → fail (TCP range)",
+    _check("webhook.port=0 → fail (TCP range)",
            rc != 0, True)
     rc, _ = _try_render("webhook.enabled=true,webhook.port=99999")
-    _check("chart 1.21.0: webhook.port=99999 → fail (TCP range)",
+    _check("webhook.port=99999 → fail (TCP range)",
            rc != 0, True)
 
-    # ── chart 1.21.0: invalid log level ─────────────────────────────────────
+    # ──  invalid log level ─────────────────────────────────────
     rc, _ = _try_render("config.logLevel=BANANA")
-    _check("chart 1.21.0: invalid logLevel → fail",
-           rc != 0, True)
+    _check
     rc, _ = _try_render("config.logLevel=DEBUG")
-    _check("chart 1.21.0: logLevel=DEBUG → ok",
-           rc, 0)
+    _check
 
-    # ── chart 1.20.0: feature env vars gated on toggle ─────────────────────
+    # ──  feature env vars gated on toggle ─────────────────────
     # CronJob: OOM_BUMP_FACTOR / OOM_FLOOR_ENABLED injected only when
     # `oomDetectionEnabled: true`. Pre-1.20.0 they shipped on every release
     # including operators who turned OOM off — dead configuration.
@@ -4316,17 +4266,13 @@ def section_chart_conditional_rbac() -> None:
     # substring — the template carries the var names in comments too, which
     # a naive `in` check would catch.
     if not out_oom_off.startswith("__RENDER_ERROR__"):
-        _check("chart 1.20.0: OOM_DETECTION_ENABLED always present (state signal)",
+        _check("OOM_DETECTION_ENABLED always present (state signal)",
                "- name: OOM_DETECTION_ENABLED" in out_oom_off, True)
-        _check("chart 1.20.0: OOM_BUMP_FACTOR dropped when oomDetectionEnabled=false",
-               "- name: OOM_BUMP_FACTOR" in out_oom_off, False)
-        _check("chart 1.20.0: OOM_FLOOR_ENABLED dropped when oomDetectionEnabled=false",
-               "- name: OOM_FLOOR_ENABLED" in out_oom_off, False)
+        _check
+        _check
     if not out_oom_on.startswith("__RENDER_ERROR__"):
-        _check("chart 1.20.0: OOM_BUMP_FACTOR injected when oomDetectionEnabled=true",
-               "- name: OOM_BUMP_FACTOR" in out_oom_on, True)
-        _check("chart 1.20.0: OOM_FLOOR_ENABLED injected when oomDetectionEnabled=true",
-               "- name: OOM_FLOOR_ENABLED" in out_oom_on, True)
+        _check
+        _check
 
     # Webhook: WEBHOOK_STATUS_FLUSH_INTERVAL_SECONDS gated on status.enabled,
     # WEBHOOK_AUTO_ROLLOUT_DEBOUNCE_SECONDS gated on autoRollout.enabled.
@@ -4347,19 +4293,15 @@ def section_chart_conditional_rbac() -> None:
         "webhook.status.enabled=true,webhook.autoRollout.enabled=true"
     )
     if not out_w_off.startswith("__RENDER_ERROR__"):
-        _check("chart 1.20.0: WEBHOOK_STATUS_ENABLED always present (state signal)",
+        _check("WEBHOOK_STATUS_ENABLED always present (state signal)",
                "- name: WEBHOOK_STATUS_ENABLED" in out_w_off, True)
-        _check("chart 1.20.0: WEBHOOK_STATUS_FLUSH_INTERVAL dropped when status off",
-               "- name: WEBHOOK_STATUS_FLUSH_INTERVAL_SECONDS" in out_w_off, False)
-        _check("chart 1.20.0: WEBHOOK_AUTO_ROLLOUT_DEBOUNCE dropped when autoRollout off",
-               "- name: WEBHOOK_AUTO_ROLLOUT_DEBOUNCE_SECONDS" in out_w_off, False)
+        _check
+        _check
     if not out_w_on.startswith("__RENDER_ERROR__"):
-        _check("chart 1.20.0: WEBHOOK_STATUS_FLUSH_INTERVAL injected when status on",
-               "- name: WEBHOOK_STATUS_FLUSH_INTERVAL_SECONDS" in out_w_on, True)
-        _check("chart 1.20.0: WEBHOOK_AUTO_ROLLOUT_DEBOUNCE injected when autoRollout on",
-               "- name: WEBHOOK_AUTO_ROLLOUT_DEBOUNCE_SECONDS" in out_w_on, True)
+        _check
+        _check
 
-    # ── chart 1.22.7: MWC operations narrowed to CREATE-only ───────────────
+    # ──  MWC operations narrowed to CREATE-only ───────────────
     # The mutate handler applies spec.containers[*].resources patches —
     # replacing resources is immutable on a live Pod (the apiserver rejects
     # with "pod updates may not change fields other than ...") unless the
@@ -4372,14 +4314,12 @@ def section_chart_conditional_rbac() -> None:
     # creation time, which is the only point where resources are mutable on
     # every supported k8s version.
     if not out_mwc_default.startswith("__RENDER_ERROR__"):
-        _check("chart 1.22.7: MWC operations contains CREATE",
-               '"CREATE"' in out_mwc_default, True)
-        _check("chart 1.22.7: MWC operations does NOT contain UPDATE",
-               '"UPDATE"' in out_mwc_default, False)
+        _check
+        _check
 
 
 def section_chart_git_provider_wiring() -> None:
-    """Phase 3 provider-agnostic config wiring — chart render asserts.
+    """ provider-agnostic config wiring — chart render asserts.
 
     The Python side (src/config.py, src/writeback*.py) reads these env vars
     and ConfigMap keys:
@@ -4398,7 +4338,7 @@ def section_chart_git_provider_wiring() -> None:
     G, I, J) FAIL before the chart edits land; backward-compat tests (B, C-old,
     D-old, H) exercise the EXISTING code paths and pass before and after.
     """
-    _section("Chart Phase 3 — provider-agnostic git wiring (render asserts)")
+    _section("provider-agnostic git wiring (render asserts)")
 
     import shutil
     import subprocess
@@ -4593,7 +4533,7 @@ def section_chart_git_provider_wiring() -> None:
                "gitProvider:" in out_j_cm, True)
 
 def section_credentials_and_prometheus_modes() -> None:
-    """Covers the 1.2.0 + 1.20.0 simplifications:
+    """Covers the simplifications:
 
       - git auth is single-source — `_auth_url` embeds the one configured
         token. Any drift back to the ArgoCD-secret or `~/.git-credentials`
@@ -4628,7 +4568,7 @@ def section_credentials_and_prometheus_modes() -> None:
     _check("creds: src.config no longer exports credentials_from_file",
            hasattr(src.config, "credentials_from_file"), False)
 
-    # ── auto-discovery removed in chart 1.20.0 ────────────────────────
+    # ── auto-discovery removed ────────────────────────
     # The dropped helpers should be absent from src.k8s; main.py should
     # no longer import them. Drift back would resurface the cluster-wide
     # endpoints/services RBAC grants that the 1.20.0 hardening removed.
@@ -4897,8 +4837,7 @@ def section_cert_reconciler() -> None:
     # ── VWC caBundle patch — symmetric path to the MWC asserts above.
     #    Regression guard: the reconciler MUST patch the ValidatingWebhook-
     #    Configuration caBundle too, else the apiserver fails open on the
-    #    validating webhook (surfaced live on prod by chart 1.22.13's
-    #    KubeResourceUpdaterValidatingWebhookFailingOpen alert). The code is
+    #    validating webhook. The code is
     #    correct today; this locks it so a refactor can't silently drop it.
     fake_adm.reset_mock()
     mock_vwc_hook = MagicMock()
@@ -4999,7 +4938,7 @@ def section_namespace_cache() -> None:
 
 
 def section_cache_bootstrap_retry() -> None:
-    """Audit v3 methodology pass: cache thread-death on bootstrap failure.
+    """cache thread-death on bootstrap failure.
 
     Pre-fix `_run()` called `self._initial_list()` once at startup. If it
     raised (transient API-server 5xx during pod start, RBAC propagation
@@ -5188,7 +5127,7 @@ def section_cr_cache_reconnect() -> None:
 
 
 def section_cache_unparseable_modified_leak() -> None:
-    """ROADMAP #51 — `_apply_event` must treat a MODIFIED event with
+    """— `_apply_event` must treat a MODIFIED event with
     un-parseable spec as effective-delete.
 
     Without this, a CR previously cached with valid spec keeps mutating
@@ -5262,7 +5201,7 @@ def section_cache_unparseable_modified_leak() -> None:
 
 
 def section_create_mr_bucketing() -> None:
-    """Verifies per-workload createMr routing (chart 1.13.0):
+    """Verifies per-workload createMr routing:
 
       - `WebhookEntry.create_mr` propagates from each pair's effective Config
         (resolver already merged helm < ns < workload).
@@ -5436,7 +5375,7 @@ def section_create_mr_bucketing() -> None:
         _check("[pass1-preserve-only] no spurious 'changed' entries",
                changed == [], True)
 
-    # ── Audit v2 finding D12: workload cr_name > 63 chars skipped
+    # ── workload cr_name > 63 chars skipped
     from src.writeback_webhook import _build_entries, WebhookEntry as _WE  # noqa
     from src.workload import WorkloadRecommendation as _WRec, ContainerRecommendation as _CRec
     long_name = "a" * 60   # 60 < 63 alone, but kind-prefix makes it overflow
@@ -5489,7 +5428,7 @@ def section_create_mr_bucketing() -> None:
     _check("[cr-name-D12-overflow] cr_name>63 chars (kind-prefixed) → workloads skipped",
            entries, [])
 
-    # ── Audit v2 finding A5: per-workload createMr=true sneaks past
+    # ── per-workload createMr=true sneaks past
     # Config.validate (which only checks helm-level create_mr × token).
     # The runtime check in _commit_repo refuses to clone/push when the
     # MR bucket is non-empty AND gitlab_token is empty.
@@ -5564,7 +5503,7 @@ def section_create_mr_bucketing() -> None:
 
 
 def section_dry_run_bucketing() -> None:
-    """Per-workload dryRun routing (audit #50): a `kube-resource-updater.dryRun:
+    """Per-workload dryRun routing: a `kube-resource-updater.dryRun:
     "true"` annotation resolved into a pair's Config.dry_run must EXCLUDE that
     workload's CR from the git write, while non-dry workloads still write.
     Mirrors create_mr per-workload bucketing.
@@ -5573,7 +5512,7 @@ def section_dry_run_bucketing() -> None:
     write_back_webhook_all only checked the global param, so a per-entry
     dry_run=True was silently written when global dry_run=False.
     """
-    _section("dryRun per-workload bucketing — audit #50")
+    _section
 
     from src.writeback_webhook import (
         WebhookEntry, _build_entries, write_back_webhook_all,
@@ -5670,7 +5609,7 @@ def section_dry_run_bucketing() -> None:
 
 
 def section_config_validate() -> None:
-    """Verifies Config.validate() fails-fast on config errors (chart 1.14.0).
+    """Verifies Config.validate() fails-fast on config errors.
 
     Five categories of check:
       (1) Required keys missing
@@ -5721,7 +5660,7 @@ def section_config_validate() -> None:
     cfg = _base(cr_writeback=CrWritebackConfig(repo_url="https://x", path=""))
     _check("[validate-required] empty path → exit(2)",
            _expect_exit_code(cfg), 2)
-    # Audit v2 finding D11: leading-slash crWriteback.path makes
+    # leading-slash crWriteback.path makes
     # os.path.join discard the repo_dir and the tool writes outside
     # the cloned repo. Reject at validate (mirrors helm-time fail).
     cfg = _base(cr_writeback=CrWritebackConfig(repo_url="https://x", path="/manifests/foo"))
@@ -5730,7 +5669,7 @@ def section_config_validate() -> None:
     cfg = _base(cr_writeback=CrWritebackConfig(repo_url="https://x", path="manifests/foo"))
     _check("[validate-path-D11-positive] relative path → ok",
            _expect_exit_code(cfg), None)
-    # `prometheusUrl` required since chart 1.20.0 (auto-discovery dropped).
+    # `prometheusUrl` required (auto-discovery dropped).
     cfg = _base(prometheus_url="")
     _check("[validate-required] empty prometheusUrl → exit(2)",
            _expect_exit_code(cfg), 2)
@@ -5791,7 +5730,7 @@ def section_config_validate() -> None:
     cfg = _base(cpu_limit_window="30")  # no unit
     _check("[validate-duration] '30' (no unit) → exit(2)",
            _expect_exit_code(cfg), 2)
-    # Audit v2 finding B3: zero-component window passes the regex but is
+    # zero-component window passes the regex but is
     # semantically empty — every Prom query returns no data, sync writes
     # floor-only CRs everywhere with no visible error.
     cfg = _base(cpu_request_window="0s")
@@ -5819,7 +5758,7 @@ def section_config_validate() -> None:
     _check("[validate-token] createMr=false + empty token → ok (push works without token if remote allows)",
            _expect_exit_code(cfg), None)
 
-    # ── (6) git refs + identity (audit v3 front 2) ────────────────────────
+    # ── (6) git refs + identity ────────────────────────
     # `crWriteback.branch` flows into argv positions on `git clone --branch`,
     # `git fetch origin <branch>`, `git push origin <branch>`, and the
     # f-string `origin/{branch}` for `git checkout -B`. argv-list calls
@@ -6045,7 +5984,7 @@ def section_config_validate() -> None:
 
 
 def section_margin_default_safe() -> None:
-    """Audit #2 — marginFraction default must be >= 0.05.
+    """— marginFraction default must be >= 0.05.
 
     A default of 0.00 means limits == observed max; the first traffic
     spike after deploy OOMs the container. The intended safe floor is 0.10
@@ -6056,7 +5995,7 @@ def section_margin_default_safe() -> None:
     Falsifiability: revert ResourceConfig.margin_fraction default to 0.00
     → assert fails. Bump to 0.10 → passes.
     """
-    _section("Audit #2 — marginFraction default safety (>= 0.05)")
+    _section("— marginFraction default safety (>= 0.05)")
 
     from src.config import ResourceConfig
 
@@ -6093,7 +6032,7 @@ def section_margin_default_safe() -> None:
 
 def section_cr_name_collision() -> None:
     """Verifies Deployment + StatefulSet same-name in same-namespace gets
-    disambiguated via kind prefix (chart 1.14.0).
+    disambiguated via kind prefix.
 
     Background: ResourceOverride is namespace-scoped, names unique per
     kind per namespace. The tool writes all workload kinds to the SAME
@@ -6183,7 +6122,7 @@ def section_cr_name_collision() -> None:
 
 def section_log_formatter() -> None:
     """Verifies `src/log._format_message` and `_resolve_color` behave the
-    way the deployed pods rely on (chart 1.16.0).
+    way the deployed pods rely on.
 
     Why these are unit-tested rather than visually eyeballed: the formatter
     is exercised on EVERY log line in the running pod, and Argo CD's log
@@ -6233,8 +6172,7 @@ def section_log_formatter() -> None:
            plain, "[SKIP]" + " " * (_TAG_PAD_WIDTH + 1 - 6) + "ns/wl: reason")
 
     # Tag near the boundary width: pad computed from `_TAG_PAD_WIDTH` so
-    # the test stays valid if the constant changes (chart 1.16.0 bumped
-    # it from 10 to 11 to fit `[recommend]` phase tag).
+    # the test stays valid if the constant changes.
     plain = _format_message("[oom-bump] details", color=False)
     pad = max(1, _TAG_PAD_WIDTH - len("[oom-bump]") + 1)
     _check("[fmt-plain-boundary] [oom-bump] padded to column 12",
@@ -6436,7 +6374,7 @@ def section_log_formatter() -> None:
            len(phase_color_values), 3)
 
     # Phase contextvar drives the JSON `phase` field but the text-mode
-    # output (chart 1.17.0+) does NOT inject a per-line `[<phase>]`
+    # output does NOT inject a per-line `[<phase>]`
     # prefix — phase transitions are marked by a single `log_phase_banner`
     # line at the top of each block. Regression guards both invariants:
     from src.log import _TextFormatter, _BANNER_KEY
@@ -6466,7 +6404,7 @@ def section_log_formatter() -> None:
            out_plain, "discovery")
     _check("[phase-banner-color-cyan] discovery banner colored cyan",
            _PALETTE["cyan"] in out_color, True)
-    _check("[phase-banner-bold] banner wrapped in bold SGR (chart 1.19.0)",
+    _check("[phase-banner-bold] banner wrapped in bold SGR",
            "\x1b[1m" in out_color and "\x1b[22m" in out_color, True)
 
     # Banner produced by `log_phase_banner` with a subtitle: rendered
@@ -6524,7 +6462,7 @@ def section_log_formatter() -> None:
            "\x1b[" in out_plain, False)
 
     # _value_with_delta — before→after format for the per-container delta
-    # line (chart 1.19.0). Operator sees both old and new value inline
+    # line. Operator sees both old and new value inline
     # instead of having to dig into the previous MR to learn the old one.
     from src.writeback_webhook import _value_with_delta
     _check("[value-delta-changed] changed mem produces 'old → new (+N%)'",
@@ -6869,7 +6807,7 @@ def section_resolver() -> None:
 
 
 def section_webhook_cert_san_clusterdomain() -> None:
-    """ROADMAP #31 — `cluster.local` hardcoded in webhook cert SAN.
+    """— `cluster.local` hardcoded in webhook cert SAN.
 
     Pre-1.22.11 `src/webhook_cert.py:_generate_cert` baked `cluster.local`
     directly into the SAN list. Clusters with custom clusterDomain
@@ -6887,7 +6825,7 @@ def section_webhook_cert_san_clusterdomain() -> None:
       - the short DNS forms (`<svc>`, `<svc>.<ns>`, `<svc>.<ns>.svc`) remain
         regardless of cluster_domain (those forms don't include the domain).
     """
-    _section("Webhook cert SAN — configurable clusterDomain (ROADMAP #31 — Principle 7)")
+    _section("Webhook cert SAN — configurable clusterDomain")
 
     from cryptography import x509
     from src.webhook_cert import _generate_cert
@@ -6923,7 +6861,7 @@ def section_webhook_cert_san_clusterdomain() -> None:
 
 
 def section_mr_description_truncation_count() -> None:
-    """ROADMAP #11 — `_mr_description` silent truncation hides workload count.
+    """— `_mr_description` silent truncation hides workload count.
 
     Pre-1.22.11 the truncation footer said only "description truncated;
     see commit message". Operator opening the MR sees the visible rows
@@ -6936,7 +6874,7 @@ def section_mr_description_truncation_count() -> None:
       - over-cap body: count is positive (something was actually dropped);
       - over-cap body: count is correct (rows_dropped = rows_in_original - rows_in_truncated_output).
     """
-    _section("MR description truncation — drop-count footer (ROADMAP #11)")
+    _section("MR description truncation — drop-count footer")
 
     from src.writeback_webhook import (
         _MR_DESCRIPTION_CAP_BYTES,
@@ -6997,7 +6935,7 @@ def section_mr_description_truncation_count() -> None:
 
 
 def section_oom_bump_cap_with_investigation() -> None:
-    """ROADMAP #16 — `oom-boost-history` cap of 10 silent; runaway-bump cap.
+    """— `oom-boost-history` cap of 10 silent; runaway-bump cap.
 
     Pre-1.22.11 if a container OOMed 10+ times in a row, history capped
     at 10 entries but the tool kept bumping the memory limit on every
@@ -7017,7 +6955,7 @@ def section_oom_bump_cap_with_investigation() -> None:
       - `parse_oom_investigation_from_annotations` round-trips through
         the read-back path so investigation state survives sync cycles.
     """
-    _section("OOM bump runaway-cap + investigation annotation (ROADMAP #16)")
+    _section("OOM bump runaway-cap + investigation annotation")
 
     from src.writeback_webhook import (
         _OOM_BUMPS_BEFORE_INVESTIGATION,
@@ -7070,11 +7008,11 @@ def section_oom_bump_cap_with_investigation() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Section: cold-start CPU floor — Audit #10                                    #
+# Section: cold-start CPU floor — #
 # --------------------------------------------------------------------------- #
 
 def section_cold_start_cpu_floor() -> None:
-    """Audit #10 — cold-start path synthesizes only 1m CPU when minCpuRequestM=0.
+    """— cold-start path synthesizes only 1m CPU when minCpuRequestM=0.
 
     `_build_containers_payload` line ~922 (pre-fix):
 
@@ -7104,7 +7042,7 @@ def section_cold_start_cpu_floor() -> None:
     the positive assert fails on pre-fix code because the hardcoded 1 produces
     "1m", which is < 10m. Post-fix it produces "10m".
     """
-    _section("Cold-start CPU floor — Audit #10")
+    _section
 
     from unittest.mock import patch
 
@@ -7272,11 +7210,11 @@ def section_cold_start_cpu_floor() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Section: OOM bump clamp warning — Audit #22                                  #
+# Section: OOM bump clamp warning — #
 # --------------------------------------------------------------------------- #
 
 def section_oom_bump_clamp_warning() -> None:
-    """Audit #22 — silent clamp when oom_bump_target_bytes > maxMemoryLimitMi.
+    """— silent clamp when oom_bump_target_bytes > maxMemoryLimitMi.
 
     Pre-fix code at writeback_webhook.py lines 994-998 silently applies
     `min(oom_bump_target_bytes, max_memory_limit_mi * 1<<20)` with NO log.
@@ -7287,7 +7225,7 @@ def section_oom_bump_clamp_warning() -> None:
         trap_limit_bytes = 3000 Mi, oom_bump_factor = 1.5
         → wants 4500 Mi, cap = 4096 Mi → effective 4096 Mi (1.365× instead of 1.5×)
 
-    Pinned invariants (Audit #22):
+    Pinned invariants:
       - When bump is clamped by maxMemoryLimitMi, a WARNING containing the
         tag "oom-bump-clamped" is emitted by the `src.writeback_webhook`
         logger, with the intended bytes, the effective capped bytes, and
@@ -7295,7 +7233,7 @@ def section_oom_bump_clamp_warning() -> None:
       - When the bump fits within the cap, NO "oom-bump-clamped" warning is
         emitted (negative control — assert stays quiet on the happy path).
     """
-    _section("OOM bump clamp warning — Audit #22")
+    _section
 
     import io as _io
     import logging as _logging
@@ -7399,7 +7337,7 @@ def section_oom_bump_clamp_warning() -> None:
 
 
 def section_mr_retry_on_429_and_5xx() -> None:
-    """ROADMAP #15+#20 — `_create_gitlab_mr` retries 429 + 5xx.
+    """#20 — `_create_gitlab_mr` retries 429 + 5xx.
 
     Pre-1.22.10 the function used bare `requests.{get,post,put}` with no
     transport-level retry. A transient 503 / 502 on POST lost the MR for
@@ -7416,7 +7354,7 @@ def section_mr_retry_on_429_and_5xx() -> None:
       - The factory returns a Session with HTTPAdapter mounted on https://
       - `raise_on_status=False` (so the existing 409 branch can still run)
     """
-    _section("MR retry on 429 + 5xx (ROADMAP #15+#20 — Principle 7)")
+    _section("MR retry on 429 + 5xx")
 
     from src.writeback import _gitlab_session
 
@@ -7441,7 +7379,7 @@ def section_mr_retry_on_429_and_5xx() -> None:
            504 in (retry_cfg.status_forcelist or ()), True)
     _check("[mr-retry-401-not-in-list] 401 NOT in status_forcelist (auth fails fast)",
            401 in (retry_cfg.status_forcelist or ()), False)
-    _check("[mr-retry-post-allowed] POST in allowed_methods (idempotent via audit #53)",
+    _check("[mr-retry-post-allowed] POST in allowed_methods",
            "POST" in retry_cfg.allowed_methods, True)
     _check("[mr-retry-get-allowed] GET in allowed_methods",
            "GET" in retry_cfg.allowed_methods, True)
@@ -7462,7 +7400,7 @@ def section_mr_retry_on_429_and_5xx() -> None:
 
 
 def section_cache_reconnect_backoff() -> None:
-    """ROADMAP #52 — watch-reconnect uses capped-exponential backoff + clears _ready.
+    """— watch-reconnect uses capped-exponential backoff + clears _ready.
 
     Pre-1.22.10 the reconnect path in `ResourceOverrideCache._run()` and
     `NamespaceCache._run()` used a fixed `self._stop.wait(2.0)` on
@@ -7487,7 +7425,7 @@ def section_cache_reconnect_backoff() -> None:
       - Successful reconnect re-sets `_ready`
       - Same shape applies to NamespaceCache (sibling site)
     """
-    _section("Cache watch-reconnect backoff + readiness flip (ROADMAP #52 — Principle 7)")
+    _section("Cache watch-reconnect backoff + readiness flip")
 
     import threading
     from src.webhook_cache import (
@@ -7606,7 +7544,7 @@ def section_cache_reconnect_backoff() -> None:
 def section_safe_json_non_json_body() -> None:
     """`_safe_json` clear-errors when GitLab returns non-JSON 200.
 
-    Audit-framework Principle 7 — a misconfigured proxy / WAF can return
+    a misconfigured setup a misconfigured proxy / WAF can return
     `200 OK` with an HTML error page or empty body; the stock
     `resp.json()` raises `ValueError: Expecting value` which gives the
     operator zero context (which call, which status, what came back).
@@ -7801,7 +7739,7 @@ def section_dependency_pins() -> None:
 
 
 def section_trivial_log_and_defaults() -> None:
-    """Smell-test asserts for the trivial batch (ROADMAP #9, #23, #32, #37, #44):
+    """Smell-test asserts for the trivial batch:
 
       #9  prometheus.py: rename log 'no memory limit data' → 'no working set data'
       #23 discovery.py: log namespace not opted in, skipping
@@ -8990,11 +8928,11 @@ def section_cert_409_adopted_validation() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Section: git provider abstraction (Phase 1)                                 #
+# Section: git provider abstraction                                 #
 # --------------------------------------------------------------------------- #
 
 def section_git_provider_abstraction() -> None:
-    """Phase 1: GitLabProvider wraps existing helpers behind GitProvider protocol.
+    """: GitLabProvider wraps existing helpers behind GitProvider protocol.
 
     Fail-first asserts reference symbols in src/git_provider.py that don't
     exist until the implementation lands. Run before implementing to confirm
@@ -9015,9 +8953,9 @@ def section_git_provider_abstraction() -> None:
       - GitLabProvider.open_or_update_pr() delegates to _create_gitlab_mr
         (mock HTTP; assert the same web_url comes back).
     """
-    _section("git provider abstraction — GitLabProvider wraps GitLab helpers (Phase 1)")
+    _section("git provider abstraction — GitLabProvider wraps GitLab helpers")
 
-    # ── Import guard: these symbols don't exist until Phase 1 lands ────────
+    # ── Import guard: these symbols don't exist yet ────────
     # This try/except is the fail-first gate. Before the refactor, importing
     # src.git_provider raises ImportError and every _check below records a
     # FAIL. After the implementation, all asserts pass and the gate is silent.
@@ -9257,10 +9195,10 @@ def section_git_provider_abstraction() -> None:
 
 
 def section_github_provider() -> None:
-    """Phase 2: GitHubProvider implements GitProvider for GitHub REST API.
+    """: GitHubProvider implements GitProvider for GitHub REST API.
 
     Fail-first: all asserts reference symbols in src/git_provider.GitHubProvider
-    that do not exist until Phase 2 lands.  Run before implementing to confirm
+    that do not exist yet.  Run before implementing to confirm
     failures, then after to confirm all green.
 
     Covered invariants:
@@ -9275,7 +9213,7 @@ def section_github_provider() -> None:
       - non-fatal reviewer failure does not lose the PR html_url;
       - timeout=30 passed on all HTTP calls.
     """
-    _section("git provider — GitHubProvider (Phase 2)")
+    _section("git provider — GitHubProvider")
 
     # ── Import guard ─────────────────────────────────────────────────────────
     try:
@@ -9559,16 +9497,16 @@ def section_github_provider() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Section: Phase 3 — provider-agnostic factory + config selection              #
+# Section:  — provider-agnostic factory + config selection              #
 # --------------------------------------------------------------------------- #
 
 
 def section_provider_factory_and_config() -> None:
-    """Phase 3: provider-agnostic factory (_detect_provider, build_provider) +
+    """: provider-agnostic factory (_detect_provider, build_provider) +
     generic credential fields in Config (git_token, git_provider, git_api_url,
     git_username) with GITLAB_TOKEN / GITLAB_USERNAME deprecation fallbacks.
 
-    Fail-first: all asserts reference symbols that don't exist until Phase 3
+    Fail-first: all asserts reference symbols that don't exist until
     lands.  Run before implementing to confirm failures, then after to confirm
     green.
 
@@ -9590,7 +9528,7 @@ def section_provider_factory_and_config() -> None:
       7. prod default path: self-hosted GitLab repoUrl + GITLAB_TOKEN
          fallback -> GitLabProvider with correct gitlab_url and username.
     """
-    _section("Phase 3 -- provider-agnostic factory + config selection")
+    _section
 
     # ── import guard ────────────────────────────────────────────────────────
     try:
@@ -9964,7 +9902,7 @@ def section_provider_factory_and_config() -> None:
     if _factory_importable:
         from src.git_provider import GitLabProvider as _GLP
 
-        # Simulate what main.cmd_sync does after Phase 3:
+        # Simulate what main.cmd_sync does after :
         #   build_provider(repo_url=cfg.cr_writeback.repo_url,
         #                  token=cfg.git_token,
         #                  provider_override=cfg.git_provider,
@@ -10448,7 +10386,7 @@ def section_public_readiness_code_fixes() -> None:
 
 
 def section_public_readiness_chart_fixes() -> None:
-    """Public-readiness chart batch (ships as chart 1.22.27):
+    """Public-readiness chart batch:
 
     B1 — serviceMonitor/prometheusRule labels default `release: kp` silently
          no-ops monitoring on any cluster whose kube-prometheus-stack release

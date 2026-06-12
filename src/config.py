@@ -113,18 +113,18 @@ class ResourceConfig:
     max_memory_request_mi: int = 0
     max_cpu_limit_m: int = 0
     max_memory_limit_mi: int = 0
-    # OOM-aware (chart 1.11.0, slow-path-only). When enabled, sync
+    # OOM-aware. When enabled, sync
     # detects OOMKilled events on opted-in workloads at run time and
     # bumps memory limit/request to `pod.limit × oom_bump_factor`.
     # See `src/writeback_webhook._apply_oom_bump`.
     oom_detection_enabled: bool = True
     oom_bump_factor: float = 1.5
-    # Floor stickiness (chart 1.12.0). When False, fresh OOMs still bump
+    # Floor stickiness. When False, fresh OOMs still bump
     # this sync's CR but the result is NOT recorded as a sticky floor on
     # the CR — subsequent syncs return to Prom-driven sizing. Toggleable
     # per-workload via annotation `kube-resource-updater.oomFloorEnabled`.
     oom_floor_enabled: bool = True
-    # Minimum CPU for cold-start OOM path (chart 1.23.0). When Prometheus has
+    # Minimum CPU for cold-start OOM path. When Prometheus has
     # no history for a container and a fresh OOM event forces a synthesized
     # resource block, this value replaces the bare 1m default, preventing
     # immediate CPU throttle and readiness failure on restart.
@@ -181,7 +181,7 @@ class ResourceConfig:
             max_memory_request_mi=_int_bound(d.get("maxMemoryRequestMi", 0), field="maxMemoryRequestMi"),
             max_cpu_limit_m=_int_bound(d.get("maxCpuLimitM", 0), field="maxCpuLimitM"),
             max_memory_limit_mi=_int_bound(d.get("maxMemoryLimitMi", 0), field="maxMemoryLimitMi"),
-            # OOM-aware (chart 1.11.0). Read from env so the chart toggle
+            # OOM-aware. Read from env so the chart toggle
             # propagates without re-rendering ConfigMap; default true so a
             # bare install protects against OOM traps out of the box.
             # `bumpFactor < 1.0` would shrink memory on each OOM; clamp
@@ -332,7 +332,7 @@ class Config:
             errors.append("config.crWriteback.repoUrl is empty (required)")
         if not self.cr_writeback.path:
             errors.append("config.crWriteback.path is empty (required)")
-        # Leading-slash path is a real footgun (docs/config-interactions-audit-v2.md, finding D11):
+        # Leading-slash path is a real footgun:
         # `os.path.join(repo_dir, path)` discards `repo_dir` when `path`
         # is absolute. The tool would try to write to `/<path>/...` on
         # the container filesystem (likely permission-denied at best,
@@ -344,7 +344,7 @@ class Config:
                 f"make Python's os.path.join discard the repo directory and write "
                 f"to the container filesystem root. Remove the leading slash."
             )
-        # `prometheusUrl` is required since chart 1.20.0 — auto-discovery
+        # `prometheusUrl` is required — auto-discovery
         # was dropped. `cmd_sync` would fail later with no recommendations
         # anyway; failing here gives the operator a single, actionable
         # error message. The chart's validate.yaml catches this at helm
@@ -352,7 +352,7 @@ class Config:
         # ConfigMap drift.
         if not self.prometheus_url:
             errors.append(
-                "config.prometheusUrl is empty — required since chart 1.20.0 "
+                "config.prometheusUrl is empty — required "
                 "(auto-discovery was removed). Set it to a reachable Prometheus URL."
             )
 
@@ -413,7 +413,7 @@ class Config:
         # combined (1h30m). Reject anything else at config-load so the operator
         # doesn't see a cryptic PromQL 400 mid-sync.
         prom_duration_re = re.compile(r"^(\d+(s|m|h|d|w|y))+$")
-        # Per docs/config-interactions-audit-v2.md finding B3: a window like `0s` is syntactically valid
+        # a window like `0s` is syntactically valid
         # but semantically empty — every Prom query returns no data, sync
         # warns "no data for <ns>/<container>" everywhere and writes
         # floor-only CRs. Reject the zero-window case.

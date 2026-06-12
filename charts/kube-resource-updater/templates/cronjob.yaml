@@ -107,7 +107,7 @@ spec:
               {{- end }}
               env:
                 {{- /*
-                GIT_TOKEN is the canonical env var (Phase 3). The helper
+                GIT_TOKEN is the canonical env var. The helper
                 kube-resource-updater.gitSecretName resolves the first non-empty
                 source: git.existingSecret → git.token → gitlab.existingSecret →
                 gitlab.token. GITLAB_TOKEN is no longer emitted — Python honors
@@ -147,7 +147,7 @@ spec:
                 {{- end }}
                 - name: HOME
                   value: /tmp/home
-                # OOM-aware (chart 1.11.0). When true, slow-path
+                # OOM-aware. When true, slow-path
                 # detects OOMKilled events at sync time, bumps memory
                 # `pod.spec.limits × oomBumpFactor`, stamps per-container
                 # `oom-floor` / `oom-last-event` / `oom-boost-history`
@@ -158,7 +158,7 @@ spec:
                 # whole OOM code path on the sync side). The dependent
                 # tuning vars (`OOM_BUMP_FACTOR` / `OOM_FLOOR_ENABLED`)
                 # are gated on `oomDetectionEnabled` so a disabled
-                # release doesn't ship dead configuration (chart 1.20.0).
+                # release doesn't ship dead configuration.
                 - name: OOM_DETECTION_ENABLED
                   value: {{ .Values.config.oomDetectionEnabled | quote }}
                 {{- if .Values.config.oomDetectionEnabled }}
