@@ -43,6 +43,7 @@ reference: [docs/reference.md](docs/reference.md).
 
 | | Item |
 |---|---|
+| 🟡 | **Cluster-wide default-on (opt-out) mode** — `config.defaultEnabled: true` treats every namespace as enabled except those in `config.excludeNamespaces` or carrying `kube-resource-updater.enabled: "false"` (explicit per-namespace opt-out); `kube-system` and the release namespace stay force-excluded. Lets an org cover a cluster without annotating each namespace one by one. Pairs with the exclude list to keep critical control-plane (vault, argocd, monitoring, etc.) out. Effort: M (discovery predicate + config field + chart values + QA). |
 | 🟡 | **Node pool awareness** — cap recommendations at the largest node available in the workload's node pool. |
 | 🟡 | **Native sidecar containers (k8s 1.28+)** — the webhook only patches `/spec/containers/*`; long-running sidecars declared in `spec.initContainers` (`restartPolicy: Always`) are skipped. |
 
