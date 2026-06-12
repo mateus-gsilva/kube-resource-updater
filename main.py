@@ -553,7 +553,7 @@ def main() -> int:
     sync_parser = sub.add_parser("sync", help="Write resource recommendations to Git")
     sync_parser.add_argument(
         "--mr", action="store_true", default=None,
-        help="Open a GitLab MR instead of pushing directly to the target branch",
+        help="Open a merge/pull request instead of pushing directly to the target branch",
     )
     webhook_parser = sub.add_parser(
         "webhook",

@@ -101,20 +101,24 @@ Unknown keys log a typo warning at sync time. See the [annotations reference](do
 # Install deps
 pip install -r requirements.txt
 
-# Configure .env with Prometheus URL + GitLab token (for MR open)
-cat > .env <<EOF
-PROMETHEUS_URL_<CLUSTER>=https://prometheus.example.com
-GITLAB_TOKEN=glpat-...
-CR_WRITEBACK_REPO_URL=https://gitlab.example.com/infra/cluster-gitops.git
-CR_WRITEBACK_PATH=manifests/kube-resource-updater
+# Point CONFIG_FILE at a local config (same shape as the chart's `config:` block)
+cat > config.yaml <<'EOF'
+config:
+  prometheusUrl: http://localhost:9090
+  createMr: false                 # direct push; no token needed for local testing
+  crWriteback:
+    repoUrl: https://gitlab.example.com/infra/cluster-gitops.git
+    path: manifests/kube-resource-updater
 EOF
 
-# Dry-run sync against the live cluster (no git writes)
-DRY_RUN=true python3 main.py sync
+# Dry-run sync against the live cluster (no git writes); uses your kubeconfig
+CONFIG_FILE=./config.yaml DRY_RUN=true python3 main.py sync
 
 # QA: ~1,250 unit assertions across all features
 python3 tools/qa_params.py
 ```
+
+The full local-dev runbook (Prometheus port-forward, connectivity check, dry-run output checks) is in [docs/reference.md](docs/reference.md#running-locally).
 
 ## Documentation
 

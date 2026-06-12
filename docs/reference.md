@@ -221,15 +221,18 @@ For workloads without autoRollout, the new resources take effect on the next nat
 
 ## Running locally
 
-This tutorial is for local development and testing only. In production the tool runs
-as a CronJob inside the cluster — see [Deploying with Helm](#deploying-with-helm).
+For local development and testing. In production the tool runs as a CronJob
+inside the cluster — see [Deploying with Helm](#deploying-with-helm).
 
 ### Prerequisites
 
 - Python 3.11+
-- `kubectl` configured with a context pointing to the cluster where ArgoCD runs
-- Read access to the ArgoCD namespace (to list `Application` and `Secret` objects)
-- A GitLab token with `read_repository` + `write_repository` scope (or `api`)
+- `kubectl` configured with a context pointing at the target cluster — the sync
+  reads workloads from it
+- A reachable Prometheus
+- A git token only for write-back: GitLab (`write_repository` / `api`) or a
+  GitHub PAT (`repo`). For local testing, set `createMr: false` (direct push) or
+  `DRY_RUN=true` (skip all git writes) and no token is needed.
 
 ### 1 — Install dependencies
 
@@ -239,75 +242,66 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-### 2 — Create the .env file
+### 2 — Write a local config file
+
+The tool reads its config from the file at `CONFIG_FILE` (default: the mounted
+ConfigMap path). Point it at a local file shaped like the chart's `config:`
+block — this avoids the deprecated env-var path:
 
 ```bash
-# .env — never commit this file
-GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
-GITLAB_USERNAME=your-username
-
-# Prometheus: point to a reachable instance
-# Option A: port-forward in-cluster Prometheus
-#   kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090:9090
-PROMETHEUS_URL_IN_CLUSTER=http://localhost:9090
-
-# Option B: use an external Prometheus URL directly
-# PROMETHEUS_URL_STAGING_CLUSTER=https://prometheus-stg.example.com
-
-# ArgoCD namespace (skip if it's "argocd")
-# ARGOCD_NAMESPACE=argocd
-
-# Safety: skip all git/MR operations
-DRY_RUN=true
-CREATE_MR=false
+cat > config.yaml <<'EOF'
+config:
+  prometheusUrl: http://localhost:9090
+  createMr: false            # direct push; no token needed for local testing
+  crWriteback:
+    repoUrl: https://gitlab.example.com/infra/cluster-gitops.git
+    branch: main
+    path: manifests/kube-resource-updater
+EOF
+export CONFIG_FILE=./config.yaml
 ```
 
-Minimum required: `GITLAB_TOKEN` + at least one `PROMETHEUS_URL_*` for each cluster
-that has enabled apps.
+The token (when `createMr: true`) is read from the `GIT_TOKEN` env var, never
+from the config file.
 
-### 3 — Port-forward Prometheus (if in-cluster)
+### 3 — Reach Prometheus
+
+If Prometheus runs in-cluster, port-forward it:
 
 ```bash
 kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090:9090 &
-```
-
-Verify it's reachable:
-```bash
 curl -s http://localhost:9090/api/v1/status/buildinfo | python3 -m json.tool | grep version
 ```
 
-### 4 — Check Prometheus connectivity
+### 4 — Check connectivity
 
 ```bash
-set -a && source .env && set +a
 .venv/bin/python3 main.py check-prometheus
 ```
 
-Expected output:
-```
-INFO [check] in-cluster: OK (version: 2.45.0)
-```
+Expected: `[check] http://localhost:9090: OK (version: 2.45.0)`. If you see
+`UNREACHABLE`, fix `prometheusUrl` before running sync.
 
-If you see `UNREACHABLE`, fix the URL before running sync.
-
-### 5 — Run a dry-run sync
+### 5 — Dry-run sync
 
 ```bash
-set -a && source .env && set +a
-DRY_RUN=true .venv/bin/python3 main.py sync --mr
+DRY_RUN=true .venv/bin/python3 main.py sync
 ```
 
+`DRY_RUN=true` computes and logs every recommendation but writes nothing to git.
 Check for:
-- No tracebacks
-- Apps discovered and listed
-- Workloads found (not all skipped)
-- Resource values printed (not all `n/a`)
-- No git operations performed (`DRY_RUN=true` in logs)
 
-### 6 — Run the QA script
+- No tracebacks
+- Opted-in namespaces discovered and their workloads listed (not all skipped)
+- Resource values printed (not all `n/a`)
+- No git operations performed (`DRY_RUN=true` in the logs)
+
+Drop `DRY_RUN` (and set `createMr` / `GIT_TOKEN` as needed) to actually open a
+merge/pull request.
+
+### 6 — Run the QA suite
 
 ```bash
-set -a && source .env && set +a
 .venv/bin/python3 tools/qa_params.py
 ```
 
@@ -904,18 +898,11 @@ clusters:          # per-cluster overrides (only prometheusUrl for now)
 | `createMr` | `CREATE_MR` | `true` | `true` opens a GitLab MR; `false` pushes directly |
 | `dryRun` | `DRY_RUN` | `false` | `true` skips all git operations |
 
-### ArgoCD
-
-| Config key | Env var (deprecated) | Default | Description |
-|---|---|---|---|
-| `argoCdNamespace` | `ARGOCD_NAMESPACE` | auto-detected | ArgoCD namespace. Auto-detected from the pod's service account token mount when unset. |
-
 ### Prometheus
 
 | Config key | Env var (deprecated) | Default | Description |
 |---|---|---|---|
-| `clusters.<name>.prometheusUrl` | `PROMETHEUS_URL_<CLUSTER>` | `""` | Per-cluster Prometheus URL |
-| `prometheusUrl` | `PROMETHEUS_URL` | `""` | Default URL used when no per-cluster URL is set |
+| `prometheusUrl` | `PROMETHEUS_URL` | `""` | Prometheus base URL (required). |
 | `resourceSource` | `RESOURCE_SOURCE` | `prometheus` | Resource source. Only `prometheus` is supported. |
 
 ### Query parameters
@@ -1194,7 +1181,7 @@ against today.
 | Dependency | Minimum | Tested | Why |
 |---|---|---|---|
 | **Kubernetes** | 1.27 | 1.34 | `CronJob.spec.timeZone` is GA in 1.27 (Beta in 1.25, default-off; not safe to require pre-1.27). `ServerSideApply=true` in `Application.spec.syncPolicy.syncOptions` requires server-side apply (GA in 1.22 — covered by the floor). Admission webhooks use `admissionregistration.k8s.io/v1` (GA 1.16). |
-| **Argo CD** | 2.6 | 2.13 | Project consumes `argoproj.io/v1alpha1` `Application` resources. The GitLab SCM webhook integration (`gitlab-scm-token` secret in the ArgoCD namespace) is supported from 2.5+; project's live test relies on it for auto-sync without manual `argocd app sync`. |
+| **Argo CD** | 2.6 | 2.13 | The `ResourceOverride` CRs are consumed by any GitOps engine that reconciles `argoproj.io/v1alpha1` `Application` resources. An SCM webhook lets Argo CD auto-sync the write-back commit without a manual `argocd app sync`. |
 | **Helm** | 3.10 | 3.16 | Chart uses Helm v2 API (`apiVersion: v2` in Chart.yaml), Bitnami `common` chart as a dependency (2.x.x), and the `required` / `fail` template functions for fail-fast validation. All available in Helm 3.10+. |
 | **GitLab** | 14.0 | self-hosted (current) | MR creation / lookup goes through `/api/v4/projects/:id/merge_requests` and `/api/v4/users` (REST v4, stable since GitLab 10.x). Squash-merge + assignee/reviewer arrays are accepted as documented in 14.0+. |
 | **Prometheus** | 2.30 | 2.x (kube-prometheus-stack) | Tool queries `/api/v1/query_range` and uses `quantile_over_time(...)` aggregation, both stable since 2.x. No PromQL features specific to newer 2.4x+ are used. |
