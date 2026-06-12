@@ -37,6 +37,7 @@ reference: [docs/reference.md](docs/reference.md).
 | | Item |
 |---|---|
 | 🟡 | **push-only / direct modes** — `config.writebackMode: gitops \| push-only \| direct`. push-only commits + pushes the branch and stops (user opens the PR); direct applies CRs straight to the cluster API, trading the git audit trail for latency. Default stays `gitops`. |
+| 🟡 | **GitHub App authentication** — the `GitHubProvider` consumes a bearer token (PAT, or an App installation token minted by something external). Native App auth (`appId` + private key + `installationId` → mint a short-lived installation token at sync-job start) gives org-scoped, short-lived, non-personal credentials — the cleaner identity for org / SOC2 deployments. The short-lived CronJob means mint-on-start is enough (no refresh loop). Effort: M (JWT signing + installation-token exchange + config/secret wiring). |
 
 ### Workload coverage
 
