@@ -17,6 +17,10 @@ metadata:
   name: {{ include "kube-resource-updater.webhook.fullname" . }}
   namespace: {{ .Release.Namespace | quote }}
   labels: {{- include "kube-resource-updater.webhook.labels" . | nindent 4 }}
+  {{- with .Values.webhook.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.webhook.replicaCount }}
   revisionHistoryLimit: {{ .Values.webhook.revisionHistoryLimit }}

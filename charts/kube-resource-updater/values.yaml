@@ -514,6 +514,8 @@ webhook:
   ## for clusters that get frequent webhook image bumps; 0 means no rollback
   ## history (`kubectl rollout undo` won't work, but live deploy is unaffected).
   revisionHistoryLimit: 10
+  ## @param webhook.deploymentAnnotations Annotations on the webhook Deployment's own metadata (NOT the pod template — use podAnnotations for that). For controllers that read Deployment-level annotations, e.g. Stakater Reloader: `configmap.reloader.stakater.com/reload: <configmap-name>`.
+  deploymentAnnotations: {}
   ## @param webhook.port TLS port the webhook listens on for AdmissionReview
   port: 9443
   ## @param webhook.metricsPort Plain-HTTP port for /healthz, /readyz, /metrics

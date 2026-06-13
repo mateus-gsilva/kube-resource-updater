@@ -2,8 +2,8 @@ apiVersion: v2
 name: kube-resource-updater
 description: Syncs Prometheus resource recommendations back to Git as ResourceOverride CRs, with an in-cluster mutation webhook that patches pod resources at admission time. Works with any GitOps engine (Argo CD, Flux, plain kubectl).
 type: application
-version: 0.1.1
-appVersion: "0.1.1"
+version: 0.1.2
+appVersion: "0.1.2"
 kubeVersion: ">= 1.27.0"
 keywords:
   - prometheus

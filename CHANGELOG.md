@@ -4,6 +4,23 @@ Release history for `kube-resource-updater`. Pending work lives in [ROADMAP.md](
 
 ---
 
+## 0.1.2 — Token-leak fix, clearer 403 hint, webhook Deployment annotations (2026-06-12)
+
+- **Security: the git token no longer leaks in tracebacks.** When a `git`
+  subprocess failed, the raised `CalledProcessError.cmd` still carried the auth
+  URL (with the token); an unhandled exception printed it in pod logs even
+  though the error log was already redacted. `_run` now scrubs the exception's
+  `cmd` before re-raising.
+- **Clearer 401/403 auth hint for fine-grained PATs.** The GitHub hint named only
+  classic-PAT scopes (`repo`/`public_repo`); it now also names the fine-grained
+  `Pull requests` + `Contents` permissions — a token with only `Contents` pushes
+  the branch but 403s on the Pulls API.
+- **New `webhook.deploymentAnnotations`** — set annotations on the webhook
+  Deployment's own metadata (e.g. `configmap.reloader.stakater.com/reload` so
+  Stakater Reloader rolls the webhook when its config ConfigMap changes).
+  `podAnnotations` only reaches the pod template, which Deployment-level
+  controllers ignore.
+
 ## 0.1.1 — Public-repo cleanup (2026-06-12)
 
 Documentation and packaging cleanup; no behavior change.

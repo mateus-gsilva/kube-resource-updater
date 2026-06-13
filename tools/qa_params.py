@@ -10556,6 +10556,29 @@ def section_public_readiness_chart_fixes() -> None:
                "ghcr.io/mateus-gsilva/kube-resource-updater:" in out_cj
                and ":latest" not in out_cj, True)
 
+    # ── 0.1.2: webhook.deploymentAnnotations land on the Deployment metadata,
+    # NOT the pod template. Deployment-level controllers (e.g. Stakater Reloader)
+    # read annotations on the Deployment object; podAnnotations don't reach them.
+    # Pre-fix the chart had no such value/wiring → the annotation never renders.
+    rc_da, out_da = _tpl(
+        "webhook.enabled=true,webhook.deploymentAnnotations.kru-test-reload=on",
+        "templates/webhook/deployment.yaml")
+    dep_doc = None
+    if rc_da == 0:
+        for _d in _yaml.safe_load_all(out_da):
+            if _d and _d.get("kind") == "Deployment":
+                dep_doc = _d
+                break
+    meta_annos = ((dep_doc or {}).get("metadata") or {}).get("annotations") or {}
+    tmpl_annos = (
+        (((dep_doc or {}).get("spec") or {}).get("template") or {}).get("metadata") or {}
+    ).get("annotations") or {}
+    _check("[wh-depanno] webhook.deploymentAnnotations renders on the Deployment metadata "
+           "(pre-fix: no such value/wiring)",
+           meta_annos.get("kru-test-reload"), "on")
+    _check("[wh-depanno] deploymentAnnotations does NOT leak onto the pod template",
+           "kru-test-reload" in tmpl_annos, False)
+
 
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
