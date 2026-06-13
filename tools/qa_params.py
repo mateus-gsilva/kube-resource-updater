@@ -996,6 +996,30 @@ def section_run_subprocess_timeout() -> None:
         _check("[run-fail-stderr-scrubbed] secret not present in non-zero-exit error log",
                "s3cr3t" in fail_blob, False)
 
+    # ── 5. Non-zero exit: the raised CalledProcessError.cmd is scrubbed ─────
+    # check_returncode() sets exc.cmd = the original argv, which carries the
+    # auth URL (token). Python prints exc.cmd in the default traceback, so an
+    # unhandled exception leaks the token even though the error LOG is clean.
+    # _run must scrub exc.cmd before re-raising.
+    with patch.object(_wbwh.subprocess, "run") as run, \
+         patch.object(_wbwh._log, "error"):
+        token_url = "https://x-access-token:s3cr3t@host/x.git"
+        result_mock = MagicMock(returncode=128, stdout="", stderr="")
+        result_mock.check_returncode.side_effect = _subprocess.CalledProcessError(
+            128, ["git", "clone", token_url, "/tmp/r"])
+        run.return_value = result_mock
+        raised_exc = None
+        try:
+            _wbwh._run(["git", "clone", token_url, "/tmp/r"])
+        except _subprocess.CalledProcessError as exc:
+            raised_exc = exc
+        _check("[run-fail-cmd-raise] non-zero exit raises CalledProcessError",
+               raised_exc is not None, True)
+        _check("[run-fail-cmd-scrubbed] secret not present in raised exc.cmd",
+               "s3cr3t" in str(raised_exc.cmd if raised_exc else ""), False)
+        _check("[run-fail-cmd-str-scrubbed] secret not present in str(exc)",
+               "s3cr3t" in str(raised_exc) if raised_exc else False, False)
+
 
 # --------------------------------------------------------------------------- #
 # Section 5: prefetch parallel — cache populates uniformly                     #
@@ -9493,6 +9517,26 @@ def section_github_provider() -> None:
         )
     _check("[gh-nonfatal-rev] reviewer failure does not propagate; html_url returned",
            url_nonfatal, "https://github.com/acme/gitops/pull/9")
+
+    # ── (10) _check_auth 403 hint covers fine-grained PAT permissions ─────────
+    # Classic-PAT "scopes" language misdirects fine-grained PAT operators: a
+    # fine-grained token with only Contents:write pushes fine but 403s on the
+    # Pulls API for lack of Pull requests:write. The hint must name it.
+    import src.git_provider as _gp_mod
+    with _patch.object(_gp_mod._log, "error") as mock_403_log:
+        fake_403 = MagicMock(
+            status_code=403,
+            headers={"Content-Type": "application/json"},
+            text='{"message":"Resource not accessible by personal access token"}',
+        )
+        _gp_mod.GitHubProvider._check_auth(fake_403)
+        _check("[gh-403-hint-logged] _check_auth logs a hint on 403",
+               mock_403_log.called, True)
+        hint_blob = " ".join(str(a) for a in (mock_403_log.call_args.args or ()))
+        _check("[gh-403-hint-pull-requests] hint names 'Pull requests'",
+               "Pull requests" in hint_blob, True)
+        _check("[gh-403-hint-contents] hint names 'Contents'",
+               "Contents" in hint_blob, True)
 
 
 

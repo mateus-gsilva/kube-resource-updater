@@ -646,16 +646,19 @@ class GitHubProvider:
     def _check_auth(resp: "requests.Response") -> None:
         """Log a helpful hint on 401/403 before raise_for_status fires.
 
-        GitHub returns 403 when the token lacks required scopes (e.g. opening
-        a PR on a private repo with a ``public_repo``-scoped token).  The
-        generic HTTPError from raise_for_status does not mention scopes; this
-        method logs a hint before the caller raises.
+        GitHub returns 403 when the token lacks the required access. The hint
+        covers both PAT styles: classic PATs need the ``repo`` scope (or
+        ``public_repo``); fine-grained PATs need the ``Pull requests`` AND
+        ``Contents`` permissions — a token with only ``Contents`` pushes the
+        branch fine but 403s on the Pulls API. The generic HTTPError from
+        raise_for_status names neither, so this logs a hint before the raise.
         """
         if resp.status_code in (401, 403):
             _log.error(
-                "[github-pr] HTTP %d from GitHub API — check token scopes: "
-                "`repo` required for private repos, `public_repo` for public. "
-                "Content-Type=%r body=%r",
+                "[github-pr] HTTP %d from GitHub API — check token permissions: "
+                "classic PAT needs `repo` scope (private) or `public_repo` (public); "
+                "fine-grained PAT needs 'Pull requests: Read and write' AND "
+                "'Contents: Read and write'. Content-Type=%r body=%r",
                 resp.status_code,
                 resp.headers.get("Content-Type", "?"),
                 (resp.text or "")[:200],

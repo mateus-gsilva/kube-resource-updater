@@ -2289,7 +2289,16 @@ def _run(cmd: list[str], allow_nonzero: bool = False,
         # single URL — a multi-line blob needs the regex redactor.
         _log.error("git command failed: %s\nstdout: %s\nstderr: %s",
                    " ".join(sanitized_cmd), _redact_auth(result.stdout), _redact_auth(result.stderr))
-        result.check_returncode()
+        try:
+            result.check_returncode()
+        except subprocess.CalledProcessError as exc:
+            # check_returncode() sets exc.cmd = the original argv, which carries
+            # the auth URL (token). Python prints exc.cmd in the default
+            # traceback, so an unhandled exception would leak the token even
+            # though the log above is scrubbed. Strip it before re-raising.
+            exc.cmd = [c if "@" not in c or "://" not in c else _strip_auth(c)
+                       for c in (exc.cmd or [])]
+            raise
     return result
 
 
