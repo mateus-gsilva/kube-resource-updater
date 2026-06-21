@@ -1,6 +1,8 @@
 ## @section Global parameters
 global:
+  ## @param global.imageRegistry Global container image registry applied to all images
   imageRegistry: ""
+  ## @param global.imagePullSecrets Global container registry secret names as an array
   imagePullSecrets: []
 
 ## @param kubeVersion Override Kubernetes version
@@ -35,11 +37,17 @@ diagnosticMode:
 ## chart's appVersion — the recommended default. Set `digest` for an
 ## immutable pin, or point `registry`/`repository` at your own mirror.
 image:
+  ## @param image.registry Container image registry
   registry: ghcr.io
+  ## @param image.repository Container image repository
   repository: mateus-gsilva/kube-resource-updater
+  ## @param image.tag Image tag (immutable tags recommended). Empty pins the image to the chart appVersion.
   tag: ""
+  ## @param image.digest Image digest (e.g. sha256:abc...) for an immutable pin; overrides image.tag when set
   digest: ""
+  ## @param image.pullPolicy Image pull policy
   pullPolicy: IfNotPresent
+  ## @param image.pullSecrets Image pull secret names as an array
   pullSecrets: []
 
 ## @section CronJob parameters
@@ -441,21 +449,32 @@ podLabels: {}
 
 ## @section Security contexts
 podSecurityContext:
+  ## @param podSecurityContext.enabled Enable the pod-level security context
   enabled: true
+  ## @param podSecurityContext.fsGroup Group ID for the volumes mounted into the pod
   fsGroup: 1001
+  ## @param podSecurityContext.runAsUser User ID for all containers in the pod
   runAsUser: 1001
+  ## @param podSecurityContext.runAsGroup Primary group ID for all containers in the pod
   runAsGroup: 1001
+  ## @param podSecurityContext.runAsNonRoot Require the pod's containers to run as a non-root user
   runAsNonRoot: true
   ## @param podSecurityContext.seccompProfile.type Seccomp profile for all containers (RuntimeDefault required by PSA `restricted`)
   seccompProfile:
     type: RuntimeDefault
 
 containerSecurityContext:
+  ## @param containerSecurityContext.enabled Enable the container-level security context
   enabled: true
+  ## @param containerSecurityContext.runAsNonRoot Require the container to run as a non-root user
   runAsNonRoot: true
+  ## @param containerSecurityContext.runAsUser User ID for the container
   runAsUser: 1001
+  ## @param containerSecurityContext.allowPrivilegeEscalation Allow privilege escalation in the container
   allowPrivilegeEscalation: false
+  ## @param containerSecurityContext.readOnlyRootFilesystem Mount the container root filesystem as read-only
   readOnlyRootFilesystem: true
+  ## @param containerSecurityContext.capabilities.drop List of Linux capabilities to drop
   capabilities:
     drop:
       - ALL
