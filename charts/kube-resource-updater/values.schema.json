@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "kube-resource-updater values",
+  "description": "Schema for the kube-resource-updater Helm chart values. Intentionally permissive: many config.* knobs are stringly-typed by design and extra keys (subchart globals, extraDeploy payloads) are allowed, so this catches structural mistakes without rejecting valid installs.",
+  "type": "object",
+  "properties": {
+    "global": {
+      "type": "object",
+      "properties": {
+        "imageRegistry": { "type": "string" },
+        "imagePullSecrets": { "type": "array" }
+      }
+    },
+    "kubeVersion": { "type": "string" },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "commonLabels": { "type": "object" },
+    "commonAnnotations": { "type": "object" },
+    "clusterDomain": { "type": "string" },
+    "extraDeploy": { "type": "array" },
+
+    "diagnosticMode": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "command": { "type": "array" },
+        "args": { "type": "array" }
+      }
+    },
+
+    "image": {
+      "type": "object",
+      "properties": {
+        "registry": { "type": "string" },
+        "repository": { "type": "string" },
+        "tag": { "type": "string" },
+        "digest": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "pullSecrets": { "type": "array" }
+      }
+    },
+
+    "cronjob": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "schedule": { "type": "string" },
+        "timeZone": { "type": "string" },
+        "concurrencyPolicy": { "type": "string", "enum": ["Allow", "Forbid", "Replace"] },
+        "successfulJobsHistoryLimit": { "type": "integer" },
+        "failedJobsHistoryLimit": { "type": "integer" },
+        "startingDeadlineSeconds": { "type": ["integer", "string", "null"] },
+        "activeDeadlineSeconds": { "type": ["integer", "string"] },
+        "ttlSecondsAfterFinished": { "type": ["integer", "string"] },
+        "backoffLimit": { "type": "integer" },
+        "restartPolicy": { "type": "string", "enum": ["OnFailure", "Never"] }
+      }
+    },
+
+    "command": { "type": "array" },
+    "args": { "type": "array" },
+
+    "config": {
+      "type": "object",
+      "properties": {
+        "gitProvider": { "type": "string", "enum": ["", "auto", "gitlab", "github"] },
+        "dryRun": { "type": ["boolean", "string"] },
+        "createMr": { "type": ["boolean", "string"] },
+        "gitAuthorName": { "type": "string" },
+        "gitAuthorEmail": { "type": "string" },
+        "cpuLimitMultiplier": { "type": ["string", "number"] },
+        "memoryLimitMultiplier": { "type": ["string", "number"] },
+        "minCpuLimitM": { "type": ["string", "number"] },
+        "minMemoryLimitMi": { "type": ["string", "number"] },
+        "logLevel": { "type": "string", "enum": ["DEBUG", "INFO", "WARNING", "ERROR"] },
+        "logFormat": { "type": "string", "enum": ["text", "json"] },
+        "logColor": { "type": "string", "enum": ["auto", "always", "never"] },
+        "cpuPercentile": { "type": ["string", "number"] },
+        "memPercentile": { "type": ["string", "number"] },
+        "cpuRequestWindow": { "type": "string" },
+        "memRequestWindow": { "type": "string" },
+        "cpuLimitWindow": { "type": "string" },
+        "memLimitWindow": { "type": "string" },
+        "marginFraction": { "type": ["string", "number"] },
+        "minCpuRequestM": { "type": ["string", "number"] },
+        "coldStartCpuFloorM": { "type": ["string", "number"] },
+        "minMemoryRequestMi": { "type": ["string", "number"] },
+        "maxCpuRequestM": { "type": ["string", "number"] },
+        "maxMemoryRequestMi": { "type": ["string", "number"] },
+        "maxCpuLimitM": { "type": ["string", "number"] },
+        "maxMemoryLimitMi": { "type": ["string", "number"] },
+        "roundValues": { "type": ["string", "boolean"] },
+        "growOnly": { "type": ["boolean", "string"] },
+        "shrinkOnly": { "type": ["boolean", "string"] },
+        "oomDetectionEnabled": { "type": ["boolean", "string"] },
+        "oomBumpFactor": { "type": ["string", "number"] },
+        "oomFloorEnabled": { "type": ["boolean", "string"] },
+        "skipContainers": { "type": "string" },
+        "crWriteback": {
+          "type": "object",
+          "properties": {
+            "repoUrl": { "type": "string" },
+            "branch": { "type": "string" },
+            "path": { "type": "string" }
+          }
+        },
+        "prometheusUrl": { "type": "string" },
+        "gitlabUsername": { "type": "string" },
+        "mr": {
+          "type": "object",
+          "properties": {
+            "assignees": { "type": "string" },
+            "reviewers": { "type": "string" },
+            "labels": { "type": "string" },
+            "squash": { "type": ["boolean", "string"] },
+            "removeSourceBranch": { "type": ["boolean", "string"] }
+          }
+        }
+      }
+    },
+
+    "git": {
+      "type": "object",
+      "properties": {
+        "token": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "type": "string" },
+        "apiUrl": { "type": "string" },
+        "username": { "type": "string" }
+      }
+    },
+
+    "gitlab": {
+      "type": "object",
+      "properties": {
+        "token": { "type": "string" },
+        "username": { "type": "string" },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "type": "string" }
+      }
+    },
+
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" },
+        "automountServiceAccountToken": { "type": "boolean" }
+      }
+    },
+
+    "rbac": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" }
+      }
+    },
+
+    "pdb": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "minAvailable": { "type": ["string", "integer"] },
+        "maxUnavailable": { "type": ["string", "integer"] }
+      }
+    },
+
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "allowExternal": { "type": "boolean" },
+        "allowExternalEgress": { "type": "boolean" },
+        "extraIngress": { "type": "array" },
+        "extraEgress": { "type": "array" }
+      }
+    },
+
+    "podAffinityPreset": { "type": "string", "enum": ["", "soft", "hard"] },
+    "podAntiAffinityPreset": { "type": "string", "enum": ["", "soft", "hard"] },
+    "nodeAffinityPreset": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["", "soft", "hard"] },
+        "key": { "type": "string" },
+        "values": { "type": "array" }
+      }
+    },
+    "affinity": { "type": "object" },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "topologySpreadConstraints": { "type": "array" },
+    "hostAliases": { "type": "array" },
+    "priorityClassName": { "type": "string" },
+    "schedulerName": { "type": "string" },
+    "terminationGracePeriodSeconds": { "type": ["integer", "string"] },
+
+    "podAnnotations": { "type": "object" },
+    "podLabels": { "type": "object" },
+
+    "podSecurityContext": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "fsGroup": { "type": "integer" },
+        "runAsUser": { "type": "integer" },
+        "runAsGroup": { "type": "integer" },
+        "runAsNonRoot": { "type": "boolean" },
+        "seccompProfile": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "containerSecurityContext": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "runAsNonRoot": { "type": "boolean" },
+        "runAsUser": { "type": "integer" },
+        "allowPrivilegeEscalation": { "type": "boolean" },
+        "readOnlyRootFilesystem": { "type": "boolean" },
+        "capabilities": { "type": "object" }
+      }
+    },
+
+    "resources": { "type": "object" },
+
+    "webhook": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicaCount": { "type": "integer" },
+        "revisionHistoryLimit": { "type": "integer" },
+        "deploymentAnnotations": { "type": "object" },
+        "port": { "type": "integer" },
+        "metricsPort": { "type": "integer" },
+        "failurePolicy": { "type": "string", "enum": ["Ignore", "Fail"] },
+        "timeoutSeconds": { "type": "integer" },
+        "sideEffects": { "type": "string" },
+        "resources": { "type": "object" },
+        "caBundle": { "type": "string" },
+        "namespaceSelector": { "type": "object" },
+        "objectSelector": { "type": "object" },
+        "validating": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
+        "autoRollout": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "debounceSeconds": { "type": ["integer", "string"] }
+          }
+        },
+        "status": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "flushIntervalSeconds": { "type": ["integer", "string"] }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "serviceMonitor": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "namespace": { "type": "string" },
+                "interval": { "type": "string" },
+                "labels": { "type": "object" }
+              }
+            },
+            "prometheusRule": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "namespace": { "type": "string" },
+                "labels": { "type": "object" }
+              }
+            }
+          }
+        },
+        "podDisruptionBudget": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "minAvailable": { "type": ["string", "integer"] }
+          }
+        },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
+      }
+    },
+
+    "extraEnvVars": { "type": "array" },
+    "extraEnvVarsCM": { "type": "string" },
+    "extraEnvVarsSecret": { "type": "string" },
+    "extraVolumes": { "type": "array" },
+    "extraVolumeMounts": { "type": "array" },
+    "initContainers": { "type": "array" },
+    "sidecars": { "type": "array" }
+  }
+}
