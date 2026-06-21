@@ -4,6 +4,19 @@ Release history for `kube-resource-updater`. Pending work lives in [ROADMAP.md](
 
 ---
 
+## 0.1.4 — GitHub App authentication (alpha) (2026-06-21)
+
+- **GitHub App authentication** for the `github` provider — an alternative to a
+  long-lived PAT, for GitHub-native / SOC2 orgs that can't hand out a personal
+  token. Set `git.appId` + `git.installationId` + `git.appPrivateKeySecret`; the
+  tool signs a short-lived App JWT (RS256, via the existing `cryptography` dep —
+  no new dependency) and exchanges it for an installation access token at sync
+  start. GHES via `git.apiUrl`. `config.validate` and the chart's `validate.yaml`
+  both reject partial config, token + App dual-mode, and App + `gitProvider=
+  gitlab`; the `createMr` gate accepts App auth as valid credentials.
+  **Alpha** — the token exchange and the "App not installed" 401/403 path are
+  mock-tested only, not yet validated against a live GitHub App.
+
 ## 0.1.3 — Artifact Hub: values schema, cosign signing, Bitnami-style README (2026-06-21)
 
 Packaging and documentation release; no behavior change to the tool.
