@@ -353,6 +353,22 @@ git:
   ## tokens and GitHub tokens do NOT need a username — they authenticate on the token alone.
   username: "oauth2"
 
+  ## GitHub App authentication (alternative to a token; GitHub provider only).
+  ## When appId + installationId + a private key are set, the tool mints a
+  ## short-lived installation token at sync time instead of using a long-lived
+  ## PAT. Mutually exclusive with git.token / git.existingSecret — the chart
+  ## fails the render if both auth modes are set.
+  ## @param git.appId GitHub App ID. Requires git.installationId and a private key.
+  appId: ""
+  ## @param git.installationId GitHub App installation ID (the App's installation on your org/repo). Required with git.appId.
+  installationId: ""
+  ## @param git.appPrivateKey GitHub App private key (PEM). DISCOURAGED inline — prefer git.appPrivateKeySecret. Mutually exclusive with appPrivateKeySecret.
+  appPrivateKey: ""
+  ## @param git.appPrivateKeySecret Name of an existing Secret holding the GitHub App PEM private key (preferred over inline appPrivateKey).
+  appPrivateKeySecret: ""
+  ## @param git.appPrivateKeySecretKey Key within git.appPrivateKeySecret that holds the PEM private key.
+  appPrivateKeySecretKey: privateKey
+
 ## @section GitLab credentials (DEPRECATED — use git: above for new installations)
 ##
 ## These values are kept for backward compatibility with existing deployments that set

@@ -205,6 +205,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         git_token=cfg.git_token,
         git_provider=cfg.git_provider,
         git_username=cfg.git_username,
+        app_configured=bool(
+            cfg.git_app_id and cfg.git_installation_id and cfg.git_app_private_key
+        ),
     )
     _log_global_config(cfg)
 
@@ -414,6 +417,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 provider_override=cfg.git_provider,
                 api_url=cfg.git_api_url,
                 username=cfg.git_username,
+                app_id=cfg.git_app_id,
+                installation_id=cfg.git_installation_id,
+                app_private_key=cfg.git_app_private_key,
             ),
             git_author_name=cfg.git_author_name,
             git_author_email=cfg.git_author_email,

@@ -145,6 +145,24 @@ which matches both the chart-rendered Secret and the conventional key name.
 {{- end }}
 
 {{/*
+GitHub App private-key Secret name.
+
+  1. git.appPrivateKeySecret → operator-managed Secret, referenced by name.
+  2. git.appPrivateKey       → chart-rendered Secret at templates/secret.yaml
+                               named `<fullname>-git-app-key`.
+
+Both empty → returns empty; the CronJob env gate skips the GITHUB_APP_PRIVATE_KEY
+injection (App auth not in use).
+*/}}
+{{- define "kube-resource-updater.appKeySecretName" -}}
+{{- if .Values.git.appPrivateKeySecret -}}
+{{- .Values.git.appPrivateKeySecret -}}
+{{- else if .Values.git.appPrivateKey -}}
+{{- printf "%s-git-app-key" (include "kube-resource-updater.fullname" .) -}}
+{{- end }}
+{{- end }}
+
+{{/*
 GitLab token Secret name — DEPRECATED alias. Kept so templates that were
 already using this helper continue to render correctly. Delegates to the
 provider-agnostic helper.

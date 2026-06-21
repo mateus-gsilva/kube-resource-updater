@@ -695,6 +695,9 @@ def build_provider(
     provider_override: str = "",
     api_url: str = "",
     username: str = "oauth2",
+    app_id: str = "",
+    installation_id: str = "",
+    app_private_key: str = "",
 ) -> GitProvider:
     """Instantiate the right ``GitProvider`` implementation for ``repo_url``.
 
@@ -752,10 +755,18 @@ def build_provider(
     resolved = override_norm if override_norm in ("gitlab", "github") else _detect_provider(repo_url)
 
     if resolved == "github":
-        return GitHubProvider(
-            token=token,
-            api_base_url=(api_url or "https://api.github.com"),
-        )
+        gh_api = api_url or "https://api.github.com"
+        gh_token = token
+        # GitHub App auth: when the App triplet is supplied, mint a short-lived
+        # installation token here (once per sync) and use it exactly like a PAT.
+        # config.validate already rejected mixing this with a token, so a
+        # non-empty app_private_key unambiguously selects App auth.
+        if app_id and installation_id and app_private_key:
+            from src.github_app_auth import mint_installation_token
+            gh_token = mint_installation_token(
+                app_id, installation_id, app_private_key, api_base=gh_api,
+            )
+        return GitHubProvider(token=gh_token, api_base_url=gh_api)
 
     # GitLab path: derive base URL from repo_url when api_url is empty,
     # matching _effective_gitlab_url in main.py exactly.

@@ -58,6 +58,7 @@ def log_git_credentials_state(
     git_token: str,
     git_provider: str = "",
     git_username: str = "oauth2",
+    app_configured: bool = False,
 ) -> None:
     """Log credential resolution state. Call once before any git operations.
 
@@ -87,9 +88,16 @@ def log_git_credentials_state(
             resolved_provider, git_username or "oauth2",
         )
         return
+    if app_configured:
+        _log.info(
+            "[git] credentials present — provider=%s auth=github-app",
+            resolved_provider,
+        )
+        return
     _log.warning(
-        "[git] GIT_TOKEN not set — git operations will fail "
-        "(set git.token or git.existingSecret in chart values)"
+        "[git] no git credentials set — git operations will fail "
+        "(set GIT_TOKEN via git.token / git.existingSecret, or configure GitHub "
+        "App auth via git.appId / git.installationId / git.appPrivateKeySecret)"
     )
 
 

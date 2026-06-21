@@ -145,6 +145,23 @@ spec:
                 - name: GIT_USERNAME
                   value: {{ $resolvedUsername | quote }}
                 {{- end }}
+                {{- /*
+                GitHub App auth (alternative to GIT_TOKEN). appId + installationId
+                are non-secret (plain values); the PEM private key is projected
+                from a Secret via the appKeySecretName helper. The Python side
+                mints a short-lived installation token from these at sync start.
+                */}}
+                {{- if and .Values.git.appId .Values.git.installationId }}
+                - name: GITHUB_APP_ID
+                  value: {{ .Values.git.appId | quote }}
+                - name: GITHUB_APP_INSTALLATION_ID
+                  value: {{ .Values.git.installationId | quote }}
+                - name: GITHUB_APP_PRIVATE_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "kube-resource-updater.appKeySecretName" . }}
+                      key: {{ .Values.git.appPrivateKeySecretKey | default "privateKey" }}
+                {{- end }}
                 - name: HOME
                   value: /tmp/home
                 # OOM-aware. When true, slow-path
