@@ -4,6 +4,25 @@ Release history for `kube-resource-updater`. Pending work lives in [ROADMAP.md](
 
 ---
 
+## 0.1.3 — Artifact Hub: values schema, cosign signing, Bitnami-style README (2026-06-21)
+
+Packaging and documentation release; no behavior change to the tool.
+
+- **Values schema** — the chart now ships `values.schema.json`, so `helm install`
+  validates values locally and Artifact Hub shows the *values-schema* badge. It is
+  permissive by design (matches the stringly-typed `config.*` knobs) — it rejects
+  wrong types and bad enums while accepting every shipped default.
+- **Signed charts** — `release.yml` signs the pushed OCI chart with cosign
+  (keyless, via GitHub Actions OIDC), so Artifact Hub shows the *Signed* badge.
+  Verify with `cosign verify ghcr.io/mateus-gsilva/charts/kube-resource-updater:<version>
+  --certificate-identity-regexp 'https://github.com/mateus-gsilva/kube-resource-updater/.*'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com`.
+- **Bitnami-style README** — restructured into the standard chart layout (TL;DR,
+  Introduction, Prerequisites, Installing/Uninstalling, Architecture, Parameters,
+  signature verification, License) with a full Parameters table. `image.*`,
+  `global.*`, and the pod/container security contexts gained `@param` annotations
+  so the table is exhaustive.
+
 ## 0.1.2 — Token-leak fix, clearer 403 hint, webhook Deployment annotations (2026-06-12)
 
 - **Security: the git token no longer leaks in tracebacks.** When a `git`
