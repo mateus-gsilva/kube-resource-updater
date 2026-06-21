@@ -10596,6 +10596,273 @@ def section_overrides_unit_file() -> None:
 # Driver                                                                       #
 # --------------------------------------------------------------------------- #
 
+def section_github_app_auth() -> None:
+    """: GitHub App authentication — short-lived installation token minting.
+
+    Fail-first: every assert references symbols that do not exist until the
+    feature lands (src/github_app_auth, Config.git_app_* fields, build_provider
+    app_* kwargs, the chart git.app* values). Run before implementing to confirm
+    failures, then after to confirm green.
+
+    Covered invariants:
+      - build_app_jwt: three Base64url segments; payload iss/iat/exp; iat < exp;
+        escaped-\\n PEM normalized; bad key -> ValueError.
+      - mint_installation_token: 201 -> token; 401 -> RuntimeError; non-JSON ->
+        RuntimeError; missing 'token' field -> RuntimeError; POSTs to the
+        /app/installations/{id}/access_tokens endpoint with a Bearer JWT; GHES
+        api_base threaded through.
+      - build_provider(app_*): returns GitHubProvider whose auth_url embeds the
+        minted installation token.
+      - Config.validate: token + app -> exit(2); appId without installationId ->
+        exit(2); app without key -> exit(2); app + gitProvider=gitlab -> exit(2);
+        createMr + app (no token) -> passes.
+      - Chart render: git.app{Id,installationId,PrivateKeySecret} -> CronJob env
+        GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID / GITHUB_APP_PRIVATE_KEY
+        (secretKeyRef); appId without installationId -> render fails; token + app
+        -> render fails.
+    """
+    _section("git provider — GitHub App authentication")
+
+    from unittest.mock import MagicMock, patch as _patch
+    import base64
+    import json as _json
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+
+    # One RSA key reused across the JWT-signing asserts.
+    _key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    _pem = _key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("ascii")
+
+    def _b64url_decode(seg: str) -> bytes:
+        return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+
+    # ── Import guard ─────────────────────────────────────────────────────────
+    try:
+        from src.github_app_auth import build_app_jwt, mint_installation_token
+        _importable = True
+    except ImportError as exc:
+        _check("[ghapp-import] src.github_app_auth importable", False, True)
+        print(f"      ImportError: {exc}")
+        _importable = False
+
+    # ── (1) build_app_jwt ────────────────────────────────────────────────────
+    if _importable:
+        jwt = build_app_jwt("12345", _pem, now=1_000_000)
+        parts = jwt.split(".")
+        _check("[ghapp-jwt] three dot-separated segments", len(parts), 3)
+        payload = _json.loads(_b64url_decode(parts[1])) if len(parts) == 3 else {}
+        _check("[ghapp-jwt] iss == app id (str)", payload.get("iss"), "12345")
+        _check("[ghapp-jwt] iat backdated 60s", payload.get("iat"), 1_000_000 - 60)
+        _check("[ghapp-jwt] exp within 10-min cap",
+               bool(payload.get("exp") and payload["exp"] <= 1_000_000 + 600), True)
+        _check("[ghapp-jwt] iat < exp",
+               bool(payload.get("iat") is not None and payload.get("exp") is not None
+                    and payload["iat"] < payload["exp"]), True)
+        # Escaped-\n PEM (common copy/paste mistake) is normalized, not crashed.
+        try:
+            _jwt2 = build_app_jwt("1", _pem.replace("\n", "\\n"), now=1)
+            _check("[ghapp-jwt] escaped-\\n PEM accepted", len(_jwt2.split(".")), 3)
+        except Exception as exc:  # noqa: BLE001
+            _check("[ghapp-jwt] escaped-\\n PEM accepted", f"raised {exc!r}", "no-raise")
+        # Garbage key -> a clear ValueError, not an opaque crypto error.
+        try:
+            build_app_jwt("1", "not-a-pem", now=1)
+            _check("[ghapp-jwt] bad key raises ValueError", "no-raise", "ValueError")
+        except ValueError:
+            _check("[ghapp-jwt] bad key raises ValueError", "ValueError", "ValueError")
+        except Exception as exc:  # noqa: BLE001
+            _check("[ghapp-jwt] bad key raises ValueError", type(exc).__name__, "ValueError")
+
+    # ── (2) mint_installation_token ──────────────────────────────────────────
+    if _importable:
+        def _resp(status, body=None, raise_json=False):
+            m = MagicMock()
+            m.status_code = status
+            if raise_json:
+                m.json.side_effect = ValueError("no json")
+            else:
+                m.json.return_value = {} if body is None else body
+            return m
+
+        with _patch("src.git_provider._github_post") as mp:
+            mp.return_value = _resp(201, {"token": "ghs_minted", "expires_at": "2030-01-01T00:00:00Z"})
+            tok = mint_installation_token("123", "456", _pem, api_base="https://api.github.com")
+            _check("[ghapp-mint] 201 returns token", tok, "ghs_minted")
+            _called = mp.call_args[0][0] if (mp.call_args and mp.call_args[0]) else ""
+            _check("[ghapp-mint] posts to access_tokens endpoint", _called,
+                   "https://api.github.com/app/installations/456/access_tokens")
+            _hdrs = (mp.call_args.kwargs.get("headers") or {}) if mp.call_args else {}
+            _check("[ghapp-mint] Authorization is a Bearer JWT",
+                   str(_hdrs.get("Authorization", "")).startswith("Bearer "), True)
+
+        with _patch("src.git_provider._github_post") as mp:
+            mp.return_value = _resp(201, {"token": "ghs_x"})
+            mint_installation_token("1", "2", _pem, api_base="https://ghe.corp/api/v3")
+            _check("[ghapp-mint] GHES api_base used",
+                   (mp.call_args[0][0] if (mp.call_args and mp.call_args[0]) else ""),
+                   "https://ghe.corp/api/v3/app/installations/2/access_tokens")
+
+        for status, body, raise_json, lbl in (
+            (401, {"message": "Bad credentials"}, False, "401"),
+            (201, None, True, "non-JSON body"),
+            (201, {"expires_at": "x"}, False, "missing token field"),
+        ):
+            with _patch("src.git_provider._github_post") as mp:
+                mp.return_value = _resp(status, body, raise_json)
+                try:
+                    mint_installation_token("1", "2", _pem)
+                    _check(f"[ghapp-mint] {lbl} raises RuntimeError", "no-raise", "RuntimeError")
+                except RuntimeError:
+                    _check(f"[ghapp-mint] {lbl} raises RuntimeError", "RuntimeError", "RuntimeError")
+
+    # ── (3) build_provider app-mode ──────────────────────────────────────────
+    try:
+        from src.git_provider import build_provider, GitHubProvider
+        with _patch("src.git_provider._github_post") as mp:
+            _m = MagicMock(status_code=201)
+            _m.json.return_value = {"token": "ghs_fromapp"}
+            mp.return_value = _m
+            prov = build_provider(
+                repo_url="https://github.com/acme/gitops.git",
+                token="",
+                provider_override="github",
+                app_id="123",
+                installation_id="456",
+                app_private_key=_pem,
+            )
+            _check("[ghapp-factory] returns GitHubProvider", isinstance(prov, GitHubProvider), True)
+            _check("[ghapp-factory] auth_url embeds minted token",
+                   "x-access-token:ghs_fromapp@" in prov.auth_url("https://github.com/acme/gitops.git"),
+                   True)
+    except TypeError as exc:
+        _check("[ghapp-factory] build_provider accepts app_* kwargs", f"TypeError: {exc}", "accepted")
+    except ImportError as exc:
+        _check("[ghapp-factory] build_provider importable", f"ImportError: {exc}", "importable")
+
+    # ── (4) Config.validate ──────────────────────────────────────────────────
+    def _expect_exit2(mutate, label):
+        cfg = _base_config()
+        cfg.create_mr = False  # isolate the App-auth check from the createMr gate
+        cfg.prometheus_url = "http://prom:9090"  # isolate from the prometheusUrl gate
+        mutate(cfg)
+        try:
+            cfg.validate()
+            _check(label, "no-exit", "exit(2)")
+        except SystemExit as e:
+            _check(label, e.code, 2)
+
+    def _m_dual(c):
+        c.git_token = "glpat"; c.git_app_id = "1"; c.git_installation_id = "2"; c.git_app_private_key = _pem
+    _expect_exit2(_m_dual, "[ghapp-validate] token + app auth -> exit(2)")
+
+    def _m_partial(c):
+        c.git_token = ""; c.git_app_id = "1"; c.git_installation_id = ""; c.git_app_private_key = _pem
+    _expect_exit2(_m_partial, "[ghapp-validate] appId without installationId -> exit(2)")
+
+    def _m_nokey(c):
+        c.git_token = ""; c.git_app_id = "1"; c.git_installation_id = "2"; c.git_app_private_key = ""
+    _expect_exit2(_m_nokey, "[ghapp-validate] app without private key -> exit(2)")
+
+    def _m_gitlab(c):
+        c.git_token = ""; c.git_provider = "gitlab"
+        c.git_app_id = "1"; c.git_installation_id = "2"; c.git_app_private_key = _pem
+    _expect_exit2(_m_gitlab, "[ghapp-validate] app + gitProvider=gitlab -> exit(2)")
+
+    # createMr=true + App auth (no token) must PASS — App auth satisfies the gate.
+    cfg_ok = _base_config()
+    cfg_ok.create_mr = True
+    cfg_ok.prometheus_url = "http://prom:9090"
+    cfg_ok.git_token = ""
+    cfg_ok.git_provider = "github"
+    cfg_ok.cr_writeback.repo_url = "https://github.com/acme/gitops.git"
+    cfg_ok.git_app_id = "1"; cfg_ok.git_installation_id = "2"; cfg_ok.git_app_private_key = _pem
+    try:
+        cfg_ok.validate()
+        _check("[ghapp-validate] createMr + app auth (no token) -> passes", "ok", "ok")
+    except SystemExit as e:
+        _check("[ghapp-validate] createMr + app auth (no token) -> passes", f"exit({e.code})", "ok")
+
+    # ── (4b) Credential-state log is App-auth aware ──────────────────────────
+    # With App auth configured (and no token) the diagnostic must NOT warn that
+    # git operations will fail — the credentials are present, just App-based.
+    try:
+        from src.writeback import log_git_credentials_state as _lgcs
+        import io as _io
+        import logging as _lg
+        _buf = _io.StringIO()
+        _h = _lg.StreamHandler(_buf)
+        _h.setLevel(_lg.WARNING)
+        _root = _lg.getLogger("src.writeback")
+        _root.addHandler(_h)
+        try:
+            _lgcs(repo_url="https://github.com/acme/gitops.git", git_token="",
+                  git_provider="github", git_username="x-access-token", app_configured=True)
+        finally:
+            _root.removeHandler(_h)
+        _out = _buf.getvalue()
+        _check("[ghapp-log] App auth (no token) -> no 'will fail' warning",
+               ("not set" in _out or "will fail" in _out), False)
+    except TypeError as exc:
+        _check("[ghapp-log] log_git_credentials_state accepts app_configured",
+               f"TypeError: {exc}", "accepted")
+    except ImportError as exc:
+        _check("[ghapp-log] log_git_credentials_state importable",
+               f"ImportError: {exc}", "importable")
+
+    # ── (5) Chart render ─────────────────────────────────────────────────────
+    import shutil
+    import subprocess
+    helm = shutil.which("helm") or next(
+        (c for c in (os.path.expanduser("~/homebrew/bin/helm"),
+                     "/opt/homebrew/bin/helm", "/usr/local/bin/helm") if os.path.isfile(c)), None)
+    chart_dir = _chart_dir()
+    if not helm or not os.path.isdir(chart_dir):
+        print(f"  [{_SKIP}] helm or chart dir unavailable — skipping app-auth render checks")
+        return
+    # createMr=false keeps the baseline render valid without a token, so the
+    # only thing that can fail an App-auth render is the App-auth validation.
+    _base = ("config.crWriteback.repoUrl=https://github.com/acme/gitops.git,"
+             "config.crWriteback.path=overrides,config.prometheusUrl=http://prom:9090,"
+             "config.gitProvider=github,config.createMr=false")
+
+    def _render(template, extra):
+        r = subprocess.run([helm, "template", "kru", chart_dir, "--set", f"{_base},{extra}",
+                            "--show-only", template], capture_output=True, text=True)
+        return r.stdout if r.returncode == 0 else f"__ERR__\n{r.stderr}"
+
+    def _try(extra):
+        r = subprocess.run([helm, "template", "kru", chart_dir, "--set", f"{_base},{extra}"],
+                           capture_output=True, text=True)
+        return r.returncode
+
+    cj = _render("templates/cronjob.yaml",
+                 "git.appId=123,git.installationId=456,git.appPrivateKeySecret=my-app-key")
+    _check("[ghapp-render] GITHUB_APP_ID env present", "GITHUB_APP_ID" in cj, True)
+    _check("[ghapp-render] GITHUB_APP_INSTALLATION_ID env present", "GITHUB_APP_INSTALLATION_ID" in cj, True)
+    _check("[ghapp-render] GITHUB_APP_PRIVATE_KEY env present", "GITHUB_APP_PRIVATE_KEY" in cj, True)
+    _check("[ghapp-render] private key via secretKeyRef", ("secretKeyRef" in cj and "my-app-key" in cj), True)
+    _check("[ghapp-render] appId without installationId -> render fails", _try("git.appId=123") != 0, True)
+    _check("[ghapp-render] token + app -> render fails",
+           _try("git.token=glpat,git.appId=123,git.installationId=456,git.appPrivateKeySecret=k") != 0, True)
+
+    # createMr=true (the DEFAULT) + App auth must render: App auth is valid
+    # MR-opening credentials, so the chart's createMr gate must accept it just
+    # like the Python validate does. Uses a base WITHOUT createMr=false.
+    _base_mr = ("config.crWriteback.repoUrl=https://github.com/acme/gitops.git,"
+                "config.crWriteback.path=overrides,config.prometheusUrl=http://prom:9090,"
+                "config.gitProvider=github")
+    _r_mr = subprocess.run(
+        [helm, "template", "kru", chart_dir, "--set",
+         f"{_base_mr},git.appId=123,git.installationId=456,git.appPrivateKeySecret=my-app-key"],
+        capture_output=True, text=True)
+    _check("[ghapp-render] createMr=true + app auth renders (gate accepts App auth)",
+           _r_mr.returncode, 0)
+
+
 def main() -> int:
     section_grow_shrink()
     section_floors()
@@ -10654,6 +10921,7 @@ def main() -> int:
     section_git_provider_abstraction()
     section_github_provider()
     section_provider_factory_and_config()
+    section_github_app_auth()
     section_chart_git_provider_wiring()
     section_webhook_cache_annotation_constant()
     section_dead_log_credentials_source()

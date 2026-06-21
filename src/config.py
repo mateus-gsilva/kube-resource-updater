@@ -300,6 +300,14 @@ class Config:
     git_provider: str = ""      # ""|"auto"|"gitlab"|"github"
     git_api_url: str = ""       # override; empty → provider default
     git_username: str = "oauth2"
+    # GitHub App auth (alternative to git_token for the github provider).
+    # appId + installationId identify the App installation; the PEM private key
+    # signs the App JWT that is exchanged for a short-lived installation token.
+    # All three from env (GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID /
+    # GITHUB_APP_PRIVATE_KEY); the key is sourced from a Secret, never the CM.
+    git_app_id: str = ""
+    git_installation_id: str = ""
+    git_app_private_key: str = ""
 
     def validate(self) -> None:
         """Fail fast at runtime when configuration is missing or inconsistent.
@@ -446,13 +454,17 @@ class Config:
         # is mirrored into git_token during from_file / from_env so both
         # paths are covered by a single check here.
         _effective_token = self.git_token or self.gitlab_token
-        if self.create_mr and not _effective_token:
+        _has_app_auth = bool(
+            self.git_app_id and self.git_installation_id and self.git_app_private_key
+        )
+        if self.create_mr and not _effective_token and not _has_app_auth:
             errors.append(
-                "config.createMr is true but no git token is configured — every MR "
-                "the tool tries to open will crash with 401. Set git.token "
-                "(or legacy gitlab.token / gitlab.existingSecret) in chart values, "
-                "OR set config.createMr=false to use direct push (no token needed "
-                "for a git remote the pod has write access to)."
+                "config.createMr is true but no git credentials are configured — every "
+                "MR the tool tries to open will crash with 401. Set git.token "
+                "(or legacy gitlab.token / gitlab.existingSecret), OR configure GitHub "
+                "App auth (git.appId + git.installationId + git.appPrivateKeySecret), "
+                "OR set config.createMr=false to use direct push (no token needed for a "
+                "git remote the pod has write access to)."
             )
 
         # ── (8) git_provider validation ───────────────────────────────────
@@ -490,6 +502,38 @@ class Config:
                     "(e.g. https://github.corp.example.com/api/v3) so the factory "
                     "targets the right API endpoint instead of api.github.com.",
                     _repo_host,
+                )
+
+        # ── (10) GitHub App auth consistency ──────────────────────────────
+        # App auth is an alternative to a PAT for the github provider. Any one
+        # of appId / installationId / private key being set means "App auth
+        # intended" — require the full, unambiguous set and refuse to mix it
+        # with a token (two auth modes would be ambiguous about which wins).
+        _app_id = self.git_app_id.strip()
+        _inst_id = self.git_installation_id.strip()
+        _app_key = self.git_app_private_key.strip()
+        if _app_id or _inst_id or _app_key:
+            if not (_app_id and _inst_id):
+                errors.append(
+                    "GitHub App auth requires BOTH git.appId and git.installationId "
+                    f"(got appId={_app_id!r}, installationId={_inst_id!r}). Set both, "
+                    "or unset all git.app* fields to use token auth."
+                )
+            if (_app_id or _inst_id) and not _app_key:
+                errors.append(
+                    "GitHub App auth is configured (git.appId / git.installationId) but "
+                    "no private key is set — provide git.appPrivateKeySecret (preferred) "
+                    "or git.appPrivateKey."
+                )
+            if self.git_token or self.gitlab_token:
+                errors.append(
+                    "Both a git token (git.token / gitlab.token) AND GitHub App auth "
+                    "(git.appId) are configured — pick ONE auth mode."
+                )
+            if self.git_provider == "gitlab":
+                errors.append(
+                    "GitHub App auth is configured but config.gitProvider is 'gitlab' — "
+                    "App auth is only supported for the GitHub provider."
                 )
 
         # ── (6) git refs + identity ────────────────────────────────────
@@ -652,6 +696,10 @@ class Config:
             git_provider=str(cfg.get("gitProvider", "")).lower().strip(),
             git_api_url=str(cfg.get("gitApiUrl", "")).rstrip("/"),
             git_username=_git_username_file,
+            # GitHub App auth — all from env (private key is Secret-sourced).
+            git_app_id=os.environ.get("GITHUB_APP_ID", "").strip(),
+            git_installation_id=os.environ.get("GITHUB_APP_INSTALLATION_ID", "").strip(),
+            git_app_private_key=os.environ.get("GITHUB_APP_PRIVATE_KEY", ""),
         )
 
     @classmethod
@@ -715,6 +763,10 @@ class Config:
             git_provider=os.environ.get("GIT_PROVIDER", "").lower().strip(),
             git_api_url=os.environ.get("GIT_API_URL", "").rstrip("/"),
             git_username=_git_username_env,
+            # GitHub App auth — all from env (private key is Secret-sourced).
+            git_app_id=os.environ.get("GITHUB_APP_ID", "").strip(),
+            git_installation_id=os.environ.get("GITHUB_APP_INSTALLATION_ID", "").strip(),
+            git_app_private_key=os.environ.get("GITHUB_APP_PRIVATE_KEY", ""),
         )
 
     @classmethod

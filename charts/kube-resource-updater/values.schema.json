@@ -126,7 +126,12 @@
         "existingSecret": { "type": "string" },
         "existingSecretKey": { "type": "string" },
         "apiUrl": { "type": "string" },
-        "username": { "type": "string" }
+        "username": { "type": "string" },
+        "appId": { "type": ["string", "integer"] },
+        "installationId": { "type": ["string", "integer"] },
+        "appPrivateKey": { "type": "string" },
+        "appPrivateKeySecret": { "type": "string" },
+        "appPrivateKeySecretKey": { "type": "string" }
       }
     },
 
