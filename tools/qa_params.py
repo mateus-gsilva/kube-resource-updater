@@ -93,6 +93,7 @@ Run:
 #   section_webhook_module_api                     Webhook module public API — no cross-module private calls
 #   section_public_readiness_code_fixes            Public-readiness code fixes — dead fn, paste artifact, dedup, content-
 #   section_public_readiness_chart_fixes           Public-readiness chart fixes — labels, NOTES, pdb, seccomp, replicas,
+#   section_health_gate                            Sample-quality gates — crash-loop health + data sufficiency
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -10580,6 +10581,319 @@ def section_public_readiness_chart_fixes() -> None:
            "kru-test-reload" in tmpl_annos, False)
 
 
+def section_health_gate() -> None:
+    """Sample-quality gates: a workload whose pods were crash-looping during
+    the sample window, or whose percentile is backed by too few samples, must
+    NOT have its recommendation recomputed from those samples.
+
+    Regression under test (2026-07-20 incident): `n8n-main` entered a crash
+    loop, the sync queried Prometheus while it was looping, and the percentile
+    math ran on failed-startup bursts instead of steady-state usage. The
+    resulting CR was far too small for the real workload, and because the
+    admission webhook re-applies the stored CR values on every restart without
+    ever recomputing, the undersizing was self-sustaining.
+
+    The fix must ALSO avoid the chart-1.14.0 trap documented in `main.cmd_sync`:
+    dropping the workload from `entries` deletes its CR doc, ArgoCD prunes the
+    CR, and pods silently fall back to deployment-spec resources. So a held
+    workload has to keep flowing through and emit the values already in the
+    apiserver.
+    """
+    _section("Sample-quality gates — crash-loop health + data sufficiency")
+
+    import contextlib
+    from types import SimpleNamespace
+
+    from src.config import ResourceConfig
+    from src.health import (
+        HOLD_INSUFFICIENT_DATA,
+        HOLD_RESTARTS,
+        assess_container,
+        expected_sample_count,
+    )
+    from src.overrides import is_health_gate_enabled, resolve_for_workload
+    from src.prometheus import (
+        query_cpu_sample_count,
+        query_mem_sample_count,
+        query_restart_count,
+    )
+    from src.workload import ContainerRecommendation, WorkloadRecommendation
+    from src.writeback_webhook import (
+        HeldContainer,
+        WebhookEntry,
+        _build_containers_payload,
+        _mr_description,
+    )
+
+    M = 1024 * 1024
+    P = "kube-resource-updater."
+
+    # ── Defaults ────────────────────────────────────────────────────────
+    rc_def = ResourceConfig()
+    _check("[default] health gate on out of the box",
+           rc_def.health_gate_enabled, True)
+    _check("[default] maxRestartsInWindow = 3 (one eviction / node drain / "
+           "single OOM in a multi-day window is noise, three is a pattern)",
+           rc_def.max_restarts_in_window, 3)
+    _check("[default] minSampleCoverage = 0.25 (a quarter of the window must "
+           "carry data before the percentile is trusted)",
+           rc_def.min_sample_coverage, 0.25)
+
+    # ── expected_sample_count ───────────────────────────────────────────
+    _check("[expected] 3d window at 1m step",  expected_sample_count("3d", "1m"), 4320)
+    _check("[expected] 8d window at 5m step",  expected_sample_count("8d", "5m"), 2304)
+    _check("[expected] unparseable window → 0 (caller treats as unknown)",
+           expected_sample_count("banana", "1m"), 0)
+    _check("[expected] zero-length step → 0 (no division by zero)",
+           expected_sample_count("3d", "500ms"), 0)
+
+    # ── Override hierarchy: helm < namespace < workload ─────────────────
+    _check("[hier] all empty → helm default",
+           is_health_gate_enabled(True, {}, {}), True)
+    _check("[hier] ns false, helm true → ns wins",
+           is_health_gate_enabled(True, {P + "healthGateEnabled": "false"}, {}), False)
+    _check("[hier] workload true, ns false → workload wins",
+           is_health_gate_enabled(True,
+                                  {P + "healthGateEnabled": "false"},
+                                  {P + "healthGateEnabled": "true"}), True)
+    _check("[hier] malformed workload value → falls through to ns",
+           is_health_gate_enabled(True,
+                                  {P + "healthGateEnabled": "false"},
+                                  {P + "healthGateEnabled": "sometimes"}), False)
+
+    base = _base_config()
+    resolved = resolve_for_workload(
+        base,
+        {P + "maxRestartsInWindow": "10"},
+        {P + "minSampleCoverage": "0.8"},
+    )
+    _check("[hier] maxRestartsInWindow resolves from the namespace layer",
+           resolved.resource.max_restarts_in_window, 10)
+    _check("[hier] minSampleCoverage resolves from the workload layer",
+           resolved.resource.min_sample_coverage, 0.8)
+    _check("[hier] resolver leaves the base Config untouched",
+           base.resource.max_restarts_in_window, 3)
+
+    # ── Config.validate range guard ─────────────────────────────────────
+    bad = _base_config()
+    bad.resource.min_sample_coverage = 1.5
+    raised = False
+    try:
+        bad.validate()
+    except SystemExit:
+        raised = True
+    _check("[validate] minSampleCoverage > 1.0 is rejected at startup", raised, True)
+
+    # ── PromQL shape ────────────────────────────────────────────────────
+    # The coverage queries have to mirror the request queries they gate:
+    # same series, same subquery step. A coverage number measured on a
+    # different resolution says nothing about the percentile's backing.
+    captured: list[str] = []
+
+    class _Resp:
+        ok = True
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"data": {"result": [{"value": [0, "7"]}]}}
+
+    def _fake_get(url, params=None, timeout=None):
+        captured.append((params or {}).get("query", ""))
+        return _Resp()
+
+    with patch("src.prometheus.requests.get", _fake_get):
+        n_restarts = query_restart_count("http://p", "n8n", "n8n", "n8n-main", "8d")
+        n_cpu = query_cpu_sample_count("http://p", "n8n", "n8n", "n8n-main", "3d")
+        n_mem = query_mem_sample_count("http://p", "n8n", "n8n", "n8n-main", "8d")
+    q_restart, q_cpu, q_mem = captured[0], captured[1], captured[2]
+
+    _check("[query] restart count returned as int", n_restarts, 7)
+    _check("[query] cpu sample count returned as int", n_cpu, 7)
+    _check("[query] mem sample count returned as int", n_mem, 7)
+    _check("[query] restarts come from the kube-state-metrics counter",
+           "kube_pod_container_status_restarts_total" in q_restart, True)
+    _check("[query] restarts measured over the sample window, not pod lifetime",
+           "[8d]" in q_restart and "increase(" in q_restart, True)
+    _check("[query] restarts scoped to the workload's pods",
+           'pod=~"' in q_restart and 'namespace="n8n"' in q_restart, True)
+    _check("[query] cpu coverage mirrors query_cpu_request_m's subquery step",
+           "count_over_time(" in q_cpu and "[3d:1m]" in q_cpu, True)
+    _check("[query] cpu coverage collapses to one series like the percentile query",
+           "max by(namespace, container)" in q_cpu, True)
+    _check("[query] mem coverage mirrors query_mem_request_bytes' subquery step",
+           "count_over_time(" in q_mem and "[8d:5m]" in q_mem, True)
+    _check("[query] mem coverage reads the working-set series",
+           "container_memory_working_set_bytes" in q_mem, True)
+
+    # ── assess_container verdicts ───────────────────────────────────────
+    rc = ResourceConfig()  # 3d cpu / 8d mem request windows, defaults above
+
+    def _assess(restarts, cpu_n, mem_n):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("src.health.query_restart_count", return_value=restarts))
+            stack.enter_context(patch("src.health.query_cpu_sample_count", return_value=cpu_n))
+            stack.enter_context(patch("src.health.query_mem_sample_count", return_value=mem_n))
+            return assess_container("http://p", "n8n", "n8n", "n8n-main", rc)
+
+    v = _assess(0, 4320, 2304)
+    _check("[assess] healthy + full coverage → not held", v.held, False)
+    v = _assess(2, 4320, 2304)
+    _check("[assess] 2 restarts is under the threshold → not held", v.held, False)
+    v = _assess(47, 4320, 2304)
+    _check("[assess] 47 restarts in the window → held", v.held, True)
+    _check("[assess] restart hold carries the restart reason", v.reason, HOLD_RESTARTS)
+    _check("[assess] restart hold detail quotes the count", "47" in v.detail, True)
+    v = _assess(0, 60, 2304)
+    _check("[assess] cpu percentile backed by 60/4320 samples → held", v.held, True)
+    _check("[assess] thin-data hold carries the data reason",
+           v.reason, HOLD_INSUFFICIENT_DATA)
+    v = _assess(0, 4320, 100)
+    _check("[assess] memory percentile backed by 100/2304 samples → held", v.held, True)
+    v = _assess(0, 1200, 700)
+    _check("[assess] exactly at the 25% coverage threshold → not held", v.held, False)
+    v = _assess(None, 4320, 2304)
+    _check("[assess] restart metric absent (no kube-state-metrics) → fail open, "
+           "not held (holding every workload would be the worse regression)",
+           v.held, False)
+    v = _assess(0, None, None)
+    _check("[assess] coverage query failed → fail open (the value queries "
+           "return None too, and the existing no-Prom-data path handles it)",
+           v.held, False)
+
+    # ── The incident: crash-looping workload keeps its committed values ──
+    cfg = _base_config()
+    cfg.prometheus_url = "http://prom:9090"
+    cfg.resource.health_gate_enabled = True
+
+    rec = WorkloadRecommendation(
+        name="n8n-main", namespace="n8n", target_kind="Deployment",
+        target_name="n8n-main",
+        containers=[ContainerRecommendation(container_name="n8n")],
+    )
+    # What the percentile math produced from the crash-looping pod's samples.
+    garbage = SimpleNamespace(
+        cpu_request_m=527, memory_request_bytes=691 * M,
+        cpu_limit_m=2108, memory_limit_bytes=2073 * M,
+    )
+    # What the workload actually needs — already committed to the live CR.
+    good = {"requests": {"cpu": "2000m", "memory": "2Gi"},
+            "limits":   {"cpu": "2000m", "memory": "2Gi"}}
+    live_state = {"floor": {}, "last_event": {}, "history": {},
+                  "containers": {"n8n": dict(good)}}
+
+    def _build(restarts, cpu_n, mem_n, state, gate=True):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("src.health.query_restart_count", return_value=restarts))
+            stack.enter_context(patch("src.health.query_cpu_sample_count", return_value=cpu_n))
+            stack.enter_context(patch("src.health.query_mem_sample_count", return_value=mem_n))
+            stack.enter_context(patch("src.writeback_webhook._query_prom_values",
+                                      return_value=garbage))
+            return _build_containers_payload(
+                rec, cfg, oom_state=state, oom_events={},
+                oom_eligible=True, health_gate_enabled=gate,
+            )
+
+    payload, _anns, held = _build(47, 4320, 2304, live_state)
+    _check("[hold] crash-looping workload is NOT dropped from entries — "
+           "dropping it prunes the CR and pods fall back to deployment spec",
+           len(payload), 1)
+    _check("[hold] CPU request preserved at the committed value, not the "
+           "527m computed from crash-loop samples",
+           payload[0]["requests"]["cpu"], "2000m")
+    _check("[hold] memory request preserved at the committed value, not 691Mi",
+           payload[0]["requests"]["memory"], "2Gi")
+    _check("[hold] CPU limit preserved", payload[0]["limits"]["cpu"], "2000m")
+    _check("[hold] memory limit preserved", payload[0]["limits"]["memory"], "2Gi")
+    _check("[hold] container reported as held", sorted(held), ["n8n"])
+    _check("[hold] hold reason is operator-readable", "47" in held["n8n"], True)
+
+    # Gate off → the garbage flows through exactly as it did in the incident.
+    # Proves the preserved values above come from the gate, not from some
+    # other clamp in the pipeline.
+    payload_off, _a, held_off = _build(47, 4320, 2304, live_state, gate=False)
+    _check("[hold] gate disabled → recommendation recomputed from the samples",
+           payload_off[0]["requests"]["cpu"] != "2000m", True)
+    _check("[hold] gate disabled → nothing reported as held", held_off, {})
+
+    # Held with no prior CR: nothing to preserve. Emitting the garbage would
+    # create the undersized CR; the container is omitted instead, so pods
+    # keep their deployment-spec resources.
+    payload_new, _a, held_new = _build(47, 4320, 2304, None)
+    _check("[hold] no committed CR to preserve → container omitted",
+           payload_new, [])
+    _check("[hold] omitted container is still reported as held",
+           sorted(held_new), ["n8n"])
+
+    # Thin data holds through the same path.
+    payload_thin, _a, held_thin = _build(0, 30, 2304, live_state)
+    _check("[hold] thin-sample workload preserves committed values",
+           payload_thin[0]["requests"]["cpu"], "2000m")
+    _check("[hold] thin-sample hold reported", sorted(held_thin), ["n8n"])
+
+    # Healthy workload is untouched by the gate.
+    payload_ok, _a, held_ok = _build(0, 4320, 2304, live_state)
+    _check("[hold] healthy workload still gets a fresh recommendation",
+           payload_ok[0]["requests"]["cpu"] != "2000m", True)
+    _check("[hold] healthy workload reports nothing held", held_ok, {})
+
+    # ── MR description surfaces the holds ───────────────────────────────
+    entry = WebhookEntry(
+        namespace="n8n", cr_name="n8n-main",
+        selector_labels={"app": "n8n"},
+        containers=[{"name": "n8n", **good}],
+    )
+    body = _mr_description(
+        [entry], {}, "overrides",
+        held_report=[HeldContainer(
+            namespace="n8n", workload="n8n-main", container="n8n",
+            reason="47 restarts in 8d (max 3)",
+        )],
+    )
+    _check("[mr] held workloads get their own section", "Held back" in body, True)
+    _check("[mr] held row names the workload", "`n8n-main`" in body, True)
+    _check("[mr] held row states the reason", "47 restarts in 8d" in body, True)
+    body_clean = _mr_description([entry], {}, "overrides", held_report=[])
+    _check("[mr] no holds → no held section", "Held back" in body_clean, False)
+
+    # ── Chart wiring ────────────────────────────────────────────────────
+    chart_dir = _chart_dir()
+    values_path = os.path.join(chart_dir, "values.yaml")
+    if not os.path.isfile(values_path):
+        print(f"  [{_SKIP}] chart values.yaml not found at {values_path}")
+        return
+    with open(values_path, encoding="utf-8") as fh:
+        values_src = fh.read()
+    for key in ("healthGateEnabled", "maxRestartsInWindow", "minSampleCoverage"):
+        _check(f"[chart] values.yaml documents @param config.{key}",
+               f"@param config.{key} " in values_src, True)
+
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    if not helm:
+        print(f"  [{_SKIP}] helm CLI not installed locally — skipping ConfigMap render")
+        return
+    result = subprocess.run(
+        [
+            helm, "template", "kru", chart_dir,
+            "--set", "config.crWriteback.repoUrl=https://example/repo.git",
+            "--set", "config.crWriteback.path=overrides",
+            "--set", "config.prometheusUrl=http://qa-prom:9090",
+            "--set", "gitlab.token=qa-fake-token",
+            "--show-only", "templates/configmap.yaml",
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"  [{_SKIP}] helm render failed (likely missing `common` dep)")
+        return
+    for key in ("healthGateEnabled", "maxRestartsInWindow", "minSampleCoverage"):
+        _check(f"[chart] rendered ConfigMap carries config.{key}",
+               key in result.stdout, True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -10931,6 +11245,7 @@ def main() -> int:
     section_webhook_module_api()
     section_public_readiness_code_fixes()
     section_public_readiness_chart_fixes()
+    section_health_gate()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 
