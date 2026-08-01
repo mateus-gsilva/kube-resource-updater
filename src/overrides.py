@@ -98,6 +98,16 @@ OOM_FLOOR_ENABLED_KEY = "oomFloorEnabled"
 # is now blocking the lower recommendation.
 OOM_FLOOR_RESET_KEY = "oomFloorReset"
 
+# Sample-quality gates (see src/health.py). Defaults to the chart's
+# `config.healthGateEnabled` (default true). False on a workload/namespace
+# means: recompute the recommendation from the window even if the source
+# pods were crash-looping or the percentile is backed by almost no samples.
+# Use case: a workload whose restarts are expected and unrelated to its
+# resource sizing (a job runner that exits non-zero by design), where the
+# gate would freeze the recommendation forever.
+# Resolution: workload > namespace > helm.
+HEALTH_GATE_ENABLED_KEY = "healthGateEnabled"
+
 # Bool literals accepted as truthy. Mirrors src/config.py:_bool — keep them
 # in lockstep so an annotation and a ConfigMap value parse the same way.
 _TRUE_LITERALS = ("1", "true", "yes")
@@ -180,6 +190,11 @@ _KEY_SPEC: dict[str, tuple[str, str, Any]] = {
     # docs/reference.md but was absent from this map, so its annotation was
     # silently dropped — same bug class as the coldStartCpuFloorM gap above.
     "oomBumpFactor":         ("resource", "oom_bump_factor",         _parse_float),
+    # Sample-quality gate thresholds. Value-bearing (unlike the
+    # `healthGateEnabled` marker), so they ride the normal _KEY_SPEC path
+    # onto ResourceConfig via `apply`.
+    "maxRestartsInWindow":   ("resource", "max_restarts_in_window",  _parse_int),
+    "minSampleCoverage":     ("resource", "min_sample_coverage",     _parse_float),
 }
 
 # Public set of key names callers can introspect (e.g. for a `--list-keys`
@@ -187,7 +202,8 @@ _KEY_SPEC: dict[str, tuple[str, str, Any]] = {
 KNOWN_KEYS: frozenset[str] = frozenset(
     {*_KEY_SPEC.keys(), OPT_IN_KEY, SKIP_KEY, AUTO_ROLLOUT_KEY,
      SKIP_CONTAINERS_KEY, OOM_DETECTION_ENABLED_KEY,
-     OOM_FLOOR_ENABLED_KEY, OOM_FLOOR_RESET_KEY},
+     OOM_FLOOR_ENABLED_KEY, OOM_FLOOR_RESET_KEY,
+     HEALTH_GATE_ENABLED_KEY},
 )
 
 
@@ -272,6 +288,15 @@ def parse_annotations(
             # this scope. The annotation itself is left in place — the
             # reset entry in `oom-boost-history.<container>` records the
             # action; operator removes the annotation manually.
+            try:
+                out[key] = _parse_bool(raw_val)
+            except ValueError as exc:
+                _log.warning("[overrides] %s: %s=%r — %s; ignored", source, raw_key, raw_val, exc)
+            continue
+
+        if key == HEALTH_GATE_ENABLED_KEY:
+            # Same shape as oomDetectionEnabled — boolean marker, valid on
+            # namespace AND workload, resolved by `is_health_gate_enabled`.
             try:
                 out[key] = _parse_bool(raw_val)
             except ValueError as exc:
@@ -367,7 +392,7 @@ def apply(base: Config, overrides: Mapping[str, Any]) -> Config:
     for key, value in overrides.items():
         if key in (OPT_IN_KEY, SKIP_KEY, AUTO_ROLLOUT_KEY, SKIP_CONTAINERS_KEY,
                    OOM_DETECTION_ENABLED_KEY, OOM_FLOOR_ENABLED_KEY,
-                   OOM_FLOOR_RESET_KEY):
+                   OOM_FLOOR_RESET_KEY, HEALTH_GATE_ENABLED_KEY):
             continue
         spec = _KEY_SPEC.get(key)
         if spec is None:
@@ -465,6 +490,27 @@ def is_oom_floor_enabled(
     """
     return _resolve_bool_chain(
         OOM_FLOOR_ENABLED_KEY, helm_default,
+        namespace_annotations, workload_annotations,
+    )
+
+
+def is_health_gate_enabled(
+    helm_default: bool,
+    namespace_annotations: Mapping[str, str] | None,
+    workload_annotations: Mapping[str, str] | None,
+) -> bool:
+    """Resolve the sample-quality gates through workload > namespace > helm.
+
+    Mirrors `is_oom_detection_enabled`: first layer that explicitly sets the
+    annotation wins, malformed values fall through to the next layer.
+
+    False means the recommendation is recomputed from the window no matter
+    what the source pods were doing — the pre-gate behaviour. The two
+    thresholds themselves (`maxRestartsInWindow`, `minSampleCoverage`) are
+    value-bearing keys and resolve through `resolve_for_workload` instead.
+    """
+    return _resolve_bool_chain(
+        HEALTH_GATE_ENABLED_KEY, helm_default,
         namespace_annotations, workload_annotations,
     )
 

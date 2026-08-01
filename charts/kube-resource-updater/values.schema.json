@@ -95,6 +95,9 @@
         "oomDetectionEnabled": { "type": ["boolean", "string"] },
         "oomBumpFactor": { "type": ["string", "number"] },
         "oomFloorEnabled": { "type": ["boolean", "string"] },
+        "healthGateEnabled": { "type": ["boolean", "string"] },
+        "maxRestartsInWindow": { "type": ["string", "number"] },
+        "minSampleCoverage": { "type": ["string", "number"] },
         "skipContainers": { "type": "string" },
         "crWriteback": {
           "type": "object",

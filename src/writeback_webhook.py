@@ -33,6 +33,7 @@ from ruamel.yaml import YAML, YAMLError
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 from src import log as _log_module
+from src.health import NOT_HELD, assess_container
 from src.writeback import (
     ResourceBounds,
     _apply_grow_shrink,
@@ -125,6 +126,20 @@ class WebhookEntry:
     dry_run: bool = False
 
 
+@dataclass(frozen=True)
+class HeldContainer:
+    """One container whose recommendation a sample-quality gate held back.
+
+    Sync-global rather than per-entry: a workload held with no committed CR
+    to preserve produces no `WebhookEntry` at all, so hanging the hold off
+    the entry would lose exactly the cases an operator most needs to see.
+    """
+    namespace: str
+    workload: str
+    container: str
+    reason: str
+
+
 # --------------------------------------------------------------------------- #
 # Public entrypoint                                                            #
 # --------------------------------------------------------------------------- #
@@ -142,6 +157,7 @@ def write_back_webhook_all(
     oom_eligibility_lookup: dict[tuple[str, str], bool] | None = None,
     oom_floor_enabled_lookup: dict[tuple[str, str], bool] | None = None,
     oom_floor_reset_lookup: dict[tuple[str, str], bool] | None = None,
+    health_gate_lookup: dict[tuple[str, str], bool] | None = None,
     auto_rollout_by_namespace: dict[str, bool] | None = None,
 ) -> list[tuple[str, list[str]]] | None:
     """Generate ResourceOverride CR files and commit them to the configured central repo.
@@ -159,6 +175,10 @@ def write_back_webhook_all(
     pipeline handles missing state gracefully (no bump, no annotation
     churn).
 
+    `health_gate_lookup` is the per-`(ns, workload)` sample-quality gate
+    decision (helm < ns < workload), resolved upstream by `cmd_sync`.
+    Missing keys default to enabled.
+
     Returns a list of (result_url, [namespace, ...]) — up to TWO entries per
     sync now, one per bucket (direct push + MR) that actually produced work.
     None on dry-run or no-op.
@@ -168,14 +188,23 @@ def write_back_webhook_all(
 
     # Compute the CR payloads up front (no git I/O yet). This means dry-run can show
     # the full set of files that *would* be written without cloning anything.
-    entries = _build_entries(
+    entries, held_report = _build_entries(
         workloads_with_configs,
         oom_state_lookup=oom_state_lookup,
         oom_events_lookup=oom_events_lookup,
         oom_eligibility_lookup=oom_eligibility_lookup,
         oom_floor_enabled_lookup=oom_floor_enabled_lookup,
         oom_floor_reset_lookup=oom_floor_reset_lookup,
+        health_gate_lookup=health_gate_lookup,
     )
+    if held_report:
+        _log.warning(
+            "[health] %d container(s) across %d workload(s) held back this sync — "
+            "their recommendations were NOT recomputed; see the [health-hold] "
+            "lines above and the MR description for the reasons.",
+            len(held_report),
+            len({(h.namespace, h.workload) for h in held_report}),
+        )
 
     # Per-entry dry-run: an entry is dry-run when its own flag is set OR when
     # the global cluster-wide dry_run override is True. The global param is
@@ -218,6 +247,7 @@ def write_back_webhook_all(
         git_author_email=git_author_email,
         mr_config=mr_config,
         auto_rollout_by_namespace=auto_rollout_by_namespace,
+        held_report=held_report,
     )
     return results or None
 
@@ -234,7 +264,8 @@ def _build_entries(
     oom_eligibility_lookup: dict[tuple[str, str], bool] | None = None,
     oom_floor_enabled_lookup: dict[tuple[str, str], bool] | None = None,
     oom_floor_reset_lookup: dict[tuple[str, str], bool] | None = None,
-) -> list[WebhookEntry]:
+    health_gate_lookup: dict[tuple[str, str], bool] | None = None,
+) -> tuple[list[WebhookEntry], list[HeldContainer]]:
     """Compute every CR's container payload from per-workload Config.
 
     The caller (cmd_sync) is responsible for filtering out workloads whose
@@ -245,13 +276,20 @@ def _build_entries(
       - `oom_state_lookup`: live state per CR from apiserver (`fetch_oom_state`).
       - `oom_events_lookup`: detected OOMKilled events per `(ns, workload, container)`.
       - `oom_eligibility_lookup`: per-`(ns, workload)` boolean (helm < ns < workload).
+
+    Returns `(entries, held_report)`. The held report covers every container
+    a sample-quality gate held back, including those belonging to workloads
+    that produced no entry — a workload held with no committed CR to
+    preserve emits nothing, and would otherwise vanish silently.
     """
     out: list[WebhookEntry] = []
+    held_report: list[HeldContainer] = []
     state_lookup = oom_state_lookup or {}
     events_lookup = oom_events_lookup or {}
     eligibility_lookup = oom_eligibility_lookup or {}
     floor_enabled_lookup = oom_floor_enabled_lookup or {}
     floor_reset_lookup = oom_floor_reset_lookup or {}
+    gate_lookup = health_gate_lookup or {}
 
     # Pre-scan for (namespace, target_name) collisions across kinds.
     # Kubernetes lets a Deployment and a StatefulSet share a name in the
@@ -324,13 +362,18 @@ def _build_entries(
         floor_enabled = floor_enabled_lookup.get(wl_key, True)
         floor_reset = floor_reset_lookup.get(wl_key, False)
 
-        containers_payload, oom_annotations = _build_containers_payload(
+        containers_payload, oom_annotations, held = _build_containers_payload(
             rec, cfg,
             oom_state=oom_state,
             oom_events=wl_events,
             oom_eligible=eligible,
             oom_floor_enabled=floor_enabled,
             oom_floor_reset=floor_reset,
+            health_gate_enabled=gate_lookup.get(wl_key, True),
+        )
+        held_report.extend(
+            HeldContainer(rec.namespace, rec.target_name, container, reason)
+            for container, reason in sorted(held.items())
         )
         if not containers_payload:
             continue
@@ -350,7 +393,7 @@ def _build_entries(
             # (resolver merged helm < ns < workload).
             dry_run=cfg.dry_run,
         ))
-    return out
+    return out, held_report
 
 
 def fetch_oom_floors(
@@ -775,15 +818,18 @@ def _build_containers_payload(
     oom_eligible: bool = True,
     oom_floor_enabled: bool = True,
     oom_floor_reset: bool = False,
-) -> tuple[list[dict], dict[str, str]]:
+    health_gate_enabled: bool = True,
+) -> tuple[list[dict], dict[str, str], dict[str, str]]:
     """Compute requests/limits for every container; apply OOM bump + floor + grow/shrink.
 
-    Returns `(payload, oom_annotations)`:
+    Returns `(payload, oom_annotations, held)`:
       - `payload`: the `containers[]` list for the CR's spec.
       - `oom_annotations`: the per-container OOM annotation keys this
         sync should stamp on the CR (`oom-floor.<c>` / `oom-last-event.<c>`
         / `oom-boost-history.<c>`). Empty when the workload had no
         relevant events and no prior state to migrate.
+      - `held`: `{container: reason}` for containers whose recommendation
+        was NOT recomputed because a sample-quality gate tripped.
 
     Inputs:
       - `cfg`: per-workload **effective** Config (resolver-merged through
@@ -804,6 +850,10 @@ def _build_containers_payload(
         but DO carry forward existing floor as the memory minimum
         (operator opted-out new bumps but historical floors stay
         respected — explicit removal goes through annotation deletion).
+      - `health_gate_enabled`: result of `is_health_gate_enabled` resolved
+        through the same chain. When True, each container is assessed
+        against the sample-quality gates in `src/health.py` BEFORE its
+        Prometheus values are read.
     """
     # Apiserver-source old_res for grow/shrink. Each container's previously
     # written `requests` / `limits` from the live CR — that's what new pods
@@ -855,7 +905,7 @@ def _build_containers_payload(
                 "on the workload, lowest in the override chain).",
                 rec.namespace, rec.target_name, name, min_v, name, max_v,
             )
-            return [], {}
+            return [], {}, {}
 
     kept, dropped = _filter_skipped_containers(rec)
     if dropped:
@@ -915,43 +965,111 @@ def _build_containers_payload(
     out_investigation = dict(prior_investigation)
 
     payload: list[dict] = []
+    held: dict[str, str] = {}
     for c in kept:
-        # Prometheus values are passed as scalar overrides to _build_container_resources;
-        # any of them being None means "fall back to multipliers/VPA target".
-        prom = _query_prom_values(c, rec, cfg.prometheus_url, rc) if cfg.prometheus_url else None
-
-        res = _build_container_resources(
-            c, bounds,
-            cpu_request_m=prom.cpu_request_m if prom else None,
-            memory_request_bytes=prom.memory_request_bytes if prom else None,
-            cpu_limit_m=prom.cpu_limit_m if prom else None,
-            memory_limit_bytes=prom.memory_limit_bytes if prom else None,
+        # ── (0) Sample-quality gates ──────────────────────────────────────
+        # Runs BEFORE the value queries. A percentile computed from a
+        # crash-looping pod's failed-startup bursts, or from a handful of
+        # samples, is not a recommendation — it's noise that the admission
+        # webhook would then re-apply on every restart without ever
+        # recomputing, so an undersized CR keeps the workload restarting
+        # and keeps the samples bad.
+        verdict = (
+            assess_container(cfg.prometheus_url, rec.namespace, c.container_name,
+                             rec.target_name, rc)
+            if health_gate_enabled and cfg.prometheus_url
+            else NOT_HELD
         )
-        if not res or not res.get("requests"):
-            # Normally we skip — without Prom data the webhook leaves the
-            # container alone. EXCEPT when a fresh OOM event exists: the
-            # workload would loop OOM forever waiting for Prom history.
-            # Synthesize minimal resources from floors + the OOM trap so
-            # the bump path below can break the loop.
-            ev = events.get(c.container_name)
-            stored = prior_last_event.get(c.container_name, "")
-            fresh_oom = oom_eligible and ev is not None and ev.finished_at > stored
-            if not fresh_oom:
+        if verdict.held:
+            held[c.container_name] = verdict.detail
+            # PRESERVE, don't prune. Dropping the container here (and with
+            # it, possibly the whole entry) would remove the CR doc from the
+            # rebuilt namespace file → ArgoCD prunes the CR → the webhook
+            # stops patching → pods silently fall back to deployment-spec
+            # resources. Same trap `cmd_sync` documents for growOnly +
+            # shrinkOnly, same resolution — emit what the apiserver already
+            # has, so the CR is unchanged rather than gone.
+            preserved = prev_res_lookup.get(c.container_name)
+            if not preserved:
+                # Nothing committed yet, so there is nothing to preserve and
+                # nothing to prune either. Emitting the values we just
+                # distrusted would be how the incident started; omit the
+                # container and let its pods keep their deployment-spec
+                # resources.
+                _log.warning(
+                    "  [health-hold] %s/%s/%s: %s — no ResourceOverride committed "
+                    "yet, so the container is omitted from this sync (its pods keep "
+                    "the resources in the workload spec). Set "
+                    "`kube-resource-updater.healthGateEnabled: \"false\"` on the "
+                    "workload to size it from the current window anyway.",
+                    rec.namespace, rec.target_name, c.container_name, verdict.detail,
+                    extra={"namespace": rec.namespace, "workload": rec.target_name,
+                           "container": c.container_name, "status": "held",
+                           "reason": verdict.reason},
+                )
                 continue
-            cpu_floor_m = max(bounds.min_cpu_request_m, rc.cold_start_cpu_floor_m)
-            cpu_cap_m = max(
-                int(round(cpu_floor_m * bounds.cpu_cap_mult)),
-                bounds.min_cpu_limit_m,
-                cpu_floor_m,
+            _log.warning(
+                "  [health-hold] %s/%s/%s: %s — recommendation NOT recomputed; "
+                "the values already committed to the ResourceOverride are kept "
+                "(req cpu=%s mem=%s, lim cpu=%s mem=%s). Fix the workload, or set "
+                "`kube-resource-updater.healthGateEnabled: \"false\"` on it to size "
+                "from the current window anyway.",
+                rec.namespace, rec.target_name, c.container_name, verdict.detail,
+                (preserved.get("requests") or {}).get("cpu", "—"),
+                (preserved.get("requests") or {}).get("memory", "—"),
+                (preserved.get("limits") or {}).get("cpu", "—"),
+                (preserved.get("limits") or {}).get("memory", "—"),
+                extra={"namespace": rec.namespace, "workload": rec.target_name,
+                       "container": c.container_name, "status": "held",
+                       "reason": verdict.reason},
             )
-            mem_req_b = max(bounds.min_memory_request_mi * (1 << 20), 1)
-            # `_enforce_floors` only re-checks lim>=req when it changed
-            # something else, so we must hold that invariant ourselves.
-            mem_lim_b = max(ev.trap_limit_bytes, mem_req_b)
+            # Feed the preserved values into the normal pipeline instead of
+            # short-circuiting to them. Steps (2)-(5) below still run: an OOM
+            # bump is driven by the kernel-observed trap limit from the pod
+            # spec, not by Prometheus, so it stays trustworthy for a
+            # crash-looping workload and must not be gated away. Floors and
+            # grow/shrink are idempotent on values that already passed them.
             res = {
-                "requests": {"cpu": f"{cpu_floor_m}m", "memory": _fmt_memory(str(mem_req_b))},
-                "limits": {"cpu": f"{cpu_cap_m}m", "memory": _fmt_memory(str(mem_lim_b))},
+                "requests": dict(preserved.get("requests") or {}),
+                "limits": dict(preserved.get("limits") or {}),
             }
+        else:
+            # Prometheus values are passed as scalar overrides to _build_container_resources;
+            # any of them being None means "fall back to multipliers/VPA target".
+            prom = _query_prom_values(c, rec, cfg.prometheus_url, rc) if cfg.prometheus_url else None
+
+            res = _build_container_resources(
+                c, bounds,
+                cpu_request_m=prom.cpu_request_m if prom else None,
+                memory_request_bytes=prom.memory_request_bytes if prom else None,
+                cpu_limit_m=prom.cpu_limit_m if prom else None,
+                memory_limit_bytes=prom.memory_limit_bytes if prom else None,
+            )
+            if not res or not res.get("requests"):
+                # Normally we skip — without Prom data the webhook leaves the
+                # container alone. EXCEPT when a fresh OOM event exists: the
+                # workload would loop OOM forever waiting for Prom history.
+                # Synthesize minimal resources from floors + the OOM trap so
+                # the bump path below can break the loop.
+                ev = events.get(c.container_name)
+                stored = prior_last_event.get(c.container_name, "")
+                fresh_oom = oom_eligible and ev is not None and ev.finished_at > stored
+                if not fresh_oom:
+                    continue
+                cpu_floor_m = max(bounds.min_cpu_request_m, rc.cold_start_cpu_floor_m)
+                cpu_cap_m = max(
+                    int(round(cpu_floor_m * bounds.cpu_cap_mult)),
+                    bounds.min_cpu_limit_m,
+                    cpu_floor_m,
+                )
+                mem_req_b = max(bounds.min_memory_request_mi * (1 << 20), 1)
+                # `_enforce_floors` only re-checks lim>=req when it changed
+                # something else, so we must hold that invariant ourselves.
+                mem_lim_b = max(ev.trap_limit_bytes, mem_req_b)
+                res = {
+                    "requests": {"cpu": f"{cpu_floor_m}m", "memory": _fmt_memory(str(mem_req_b))},
+                    "limits": {"cpu": f"{cpu_cap_m}m", "memory": _fmt_memory(str(mem_lim_b))},
+                }
 
         # ── OPERATION ORDER ────────────────────────────────
         # 1. Initial floors/ceilings already applied inside _build_container_resources.
@@ -1179,7 +1297,7 @@ def _build_containers_payload(
             continue
         oom_annotations[investigation_annotation_key(container)] = "true"
 
-    return payload, oom_annotations
+    return payload, oom_annotations, held
 
 
 @dataclass
@@ -1689,6 +1807,7 @@ def _commit_repo(
     git_author_email: str,
     mr_config: MrConfig | None = None,
     auto_rollout_by_namespace: "dict[str, bool] | None" = None,
+    held_report: "list[HeldContainer] | None" = None,
 ) -> list[tuple[str, list[str]]]:
     """Clone the repo, bucket-split entries by per-workload `create_mr`, push.
 
@@ -1707,6 +1826,11 @@ def _commit_repo(
     Orphan cleanup (files for namespaces that no longer have ANY entry) runs
     in the LAST pass that actually executes — direct-only or MR-only does it
     in its own pass, mixed runs do it in pass-2 (MR).
+
+    `held_report` is sync-global rather than bucket-scoped: a workload held
+    with no committed CR produces no entry, so there is no `create_mr` value
+    to bucket it by. The MR description therefore reports every hold from
+    this sync, not only the holds affecting the workloads in its own diff.
     """
     direct_entries = [e for e in entries if not e.create_mr]
     mr_entries = [e for e in entries if e.create_mr]
@@ -1865,7 +1989,8 @@ def _commit_repo(
                         target_branch=branch,
                         title=_mr_title(mr_entries),
                         description=_mr_description(mr_entries, old_docs, path,
-                                                     auto_rollout_by_namespace=auto_rollout_by_namespace),
+                                                     auto_rollout_by_namespace=auto_rollout_by_namespace,
+                                                     held_report=held_report),
                         assignees=assignee_ids,
                         reviewers=reviewer_ids,
                         labels=(mr_config.labels if mr_config else None),
@@ -2126,9 +2251,16 @@ def _mr_description(
     old_docs: dict[str, dict],
     path: str,
     auto_rollout_by_namespace: "dict[str, bool] | None" = None,
+    held_report: "list[HeldContainer] | None" = None,
 ) -> str:
     """Markdown summary: per-container row with CPU/mem requests and limits,
     each annotated with `(+/-N%)` deltas vs the previously committed CR.
+
+    When a sample-quality gate held workloads back this sync, they get their
+    own table. Without it the reviewer sees a diff that is silent about the
+    workloads whose values did NOT move, and cannot tell "nothing changed
+    because usage is stable" apart from "nothing changed because the tool
+    refused to trust the data".
     """
     rows: list[str] = []
     files: list[str] = []
@@ -2194,6 +2326,28 @@ def _mr_description(
             f"`kube-resource-updater.autoRollout: \"true\"`."
         )
 
+    held_section = ""
+    if held_report:
+        held_rows = "\n".join(
+            f"| `{h.namespace}` | `{h.workload}` | `{h.container}` | {h.reason} |"
+            for h in sorted(held_report,
+                            key=lambda x: (x.namespace, x.workload, x.container))
+        )
+        held_section = (
+            "## Held back\n\n"
+            "These containers were **not** recomputed this sync — the samples in "
+            "the window did not describe the workload doing its job. Values "
+            "already committed to their `ResourceOverride` are kept unchanged "
+            "(containers with no committed CR yet are omitted entirely, so their "
+            "pods keep the resources in the workload spec).\n\n"
+            "| Namespace | Workload | Container | Reason |\n"
+            "|---|---|---|---|\n"
+            f"{held_rows}\n\n"
+            "Fix the workload, or set "
+            "`kube-resource-updater.healthGateEnabled: \"false\"` on it to size "
+            "from the current window anyway.\n\n"
+        )
+
     footer = "\n".join(footer_parts)
     body = (
         "## ResourceOverride CRs\n\n"
@@ -2201,6 +2355,7 @@ def _mr_description(
         "|---|---|---|---|---|---|---|\n"
         + "\n".join(rows) + "\n\n"
         f"**Modified files:**\n{files_str}\n\n"
+        f"{held_section}"
         f"{footer}\n\n"
         "---\n*Auto-generated by **kube-resource-updater** (webhook write-back mode).*\n"
     )

@@ -272,7 +272,7 @@ def section_grow_shrink() -> None:
         },
     }
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_lower):
-        payload, _ = _build_containers_payload(
+        payload, _, _held = _build_containers_payload(
             rec_g, cfg_grow,
             oom_state={
                 "floor": {}, "last_event": {}, "history": {},
@@ -280,6 +280,7 @@ def section_grow_shrink() -> None:
             },
             oom_events={},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
     _check("[grow-only integration] Prom shrink blocked, cpu req kept at old (300m)",
            payload[0]["requests"]["cpu"], "300m")
@@ -298,7 +299,7 @@ def section_grow_shrink() -> None:
         cr_writeback=CrWritebackConfig(repo_url="https://x", path="overrides"),
     )
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_lower):
-        payload, _ = _build_containers_payload(
+        payload, _, _held = _build_containers_payload(
             rec_g, cfg_shrink,
             oom_state={
                 "floor": {}, "last_event": {}, "history": {},
@@ -306,6 +307,7 @@ def section_grow_shrink() -> None:
             },
             oom_events={},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
     _check("[shrink-only integration] Prom shrink allowed (new < old)",
            payload[0]["requests"]["cpu"], "100m")
@@ -329,7 +331,7 @@ def section_grow_shrink() -> None:
         },
     }
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_lower):
-        payload, anns = _build_containers_payload(
+        payload, anns, _held = _build_containers_payload(
             rec_g, cfg_shrink,
             oom_state={
                 "floor": {}, "last_event": {}, "history": {},
@@ -337,6 +339,7 @@ def section_grow_shrink() -> None:
             },
             oom_events={"app": ev},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
     _check("[shrink+OOM] bump SUPPRESSED — lim stays at 200Mi (matches old)",
            payload[0]["limits"]["memory"], "200Mi")
@@ -353,7 +356,7 @@ def section_grow_shrink() -> None:
     # ── grow_only + OOM bump → bump APPLIED normally (no conflict) ─────
     cfg_grow.resource = ResourceConfig(oom_bump_factor=1.5, oom_floor_enabled=True)
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_lower):
-        payload, anns = _build_containers_payload(
+        payload, anns, _held = _build_containers_payload(
             rec_g, cfg_grow,
             oom_state={
                 "floor": {}, "last_event": {}, "history": {},
@@ -361,6 +364,7 @@ def section_grow_shrink() -> None:
             },
             oom_events={"app": ev},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
     _check("[grow+OOM] bump applied — lim raised to 300Mi (trap × 1.5)",
            payload[0]["limits"]["memory"], "300Mi")
@@ -2773,7 +2777,7 @@ def section_skip_containers() -> None:
         )
         rec_all_skipped.skip_containers = ["main"]
         cfg_minimal = _base_config()
-        payload, _annotations = _build_containers_payload(
+        payload, _annotations, _held = _build_containers_payload(
             rec_all_skipped, cfg_minimal,
             oom_state=None, oom_events=None, oom_eligible=True,
             oom_floor_enabled=True, oom_floor_reset=False,
@@ -3251,7 +3255,7 @@ def section_oom_slow_path() -> None:
 
     # No event → no annotations stamped.
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_values):
-        payload, anns = _build_containers_payload(
+        payload, anns, _held = _build_containers_payload(
             rec, cfg, oom_state=None, oom_events={}, oom_eligible=True,
         )
     _check("[bump] no event → no oom annotations",
@@ -3264,11 +3268,12 @@ def section_oom_slow_path() -> None:
         trap_limit_bytes=64 * M,
     )
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_values):
-        payload, anns = _build_containers_payload(
+        payload, anns, _held = _build_containers_payload(
             rec, cfg,
             oom_state={"floor": {}, "last_event": {}, "history": {}},
             oom_events={"app": ev},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
     floor_key_app = floor_annotation_key("app")
     last_key_app = last_event_annotation_key("app")
@@ -3285,7 +3290,7 @@ def section_oom_slow_path() -> None:
 
     # Same finishedAt → DEDUPE, no bump.
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_values):
-        payload, anns = _build_containers_payload(
+        payload, anns, _held = _build_containers_payload(
             rec, cfg,
             oom_state={
                 "floor": {"app": 96 * M},
@@ -3294,6 +3299,7 @@ def section_oom_slow_path() -> None:
             },
             oom_events={"app": ev},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
     _check("[bump] dedupe: same finishedAt → no new history entry",
            anns.get(hist_key_app, ""), "")
@@ -3308,7 +3314,7 @@ def section_oom_slow_path() -> None:
         trap_limit_bytes=128 * M,
     )
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_values):
-        payload, anns = _build_containers_payload(
+        payload, anns, _held = _build_containers_payload(
             rec, cfg,
             oom_state={
                 "floor": {"app": 96 * M},
@@ -3332,11 +3338,12 @@ def section_oom_slow_path() -> None:
         trap_limit_bytes=64 * M,   # × 2 = 128Mi, but ceiling is 100Mi
     )
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_values):
-        payload, anns = _build_containers_payload(
+        payload, anns, _held = _build_containers_payload(
             rec, cfg,
             oom_state={"floor": {}, "last_event": {}, "history": {}},
             oom_events={"app": ev_big},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
     _check("[ceiling] floor capped at maxMemoryLimitMi",
            anns.get(floor_key_app), "100Mi")
@@ -3357,11 +3364,12 @@ def section_oom_slow_path() -> None:
     )
     # Mock _query_prom_values to return None (no Prom data path).
     with patch("src.writeback_webhook._query_prom_values", return_value=None):
-        payload, anns = _build_containers_payload(
+        payload, anns, _held = _build_containers_payload(
             rec, cfg,
             oom_state={"floor": {}, "last_event": {}, "history": {}},
             oom_events={"app": ev_noprom},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
     _check("[no-prom] payload still contains the container",
            [p["name"] for p in payload], ["app"])
@@ -3375,7 +3383,7 @@ def section_oom_slow_path() -> None:
     # No-Prom + NO OOM event → still skipped (synthesis only triggers on
     # fresh OOMs; otherwise the legacy "no recommendation" behavior holds).
     with patch("src.writeback_webhook._query_prom_values", return_value=None):
-        payload2, anns2 = _build_containers_payload(
+        payload2, anns2, _held = _build_containers_payload(
             rec, cfg, oom_state=None, oom_events={}, oom_eligible=True,
         )
     _check("[no-prom] no OOM → empty payload",
@@ -3386,7 +3394,7 @@ def section_oom_slow_path() -> None:
     # No-Prom + OOM but workload ineligible → still skipped (don't bump
     # workloads that opted out of OOM detection).
     with patch("src.writeback_webhook._query_prom_values", return_value=None):
-        payload3, anns3 = _build_containers_payload(
+        payload3, anns3, _held = _build_containers_payload(
             rec, cfg,
             oom_state=None, oom_events={"app": ev_noprom},
             oom_eligible=False,
@@ -3399,11 +3407,12 @@ def section_oom_slow_path() -> None:
     cfg.resource.min_memory_request_mi = 100   # restore chart-default floor
     cfg.resource.memory_limit_multiplier = 3.0
     with patch("src.writeback_webhook._query_prom_values", return_value=None):
-        payload4, anns4 = _build_containers_payload(
+        payload4, anns4, _held = _build_containers_payload(
             rec, cfg,
             oom_state={"floor": {}, "last_event": {}, "history": {}},
             oom_events={"app": ev_noprom},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
     # The 100Mi mem-request floor pushes the limit up (lim>=req) to 100Mi,
     # bigger than trap×1.5 = 24Mi → the OOM bump is a no-op for the limit.
@@ -3430,11 +3439,12 @@ def section_oom_slow_path() -> None:
         trap_limit_bytes=64 * M,
     )
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_values):
-        payload5, anns5 = _build_containers_payload(
+        payload5, anns5, _held = _build_containers_payload(
             rec, cfg,
             oom_state={"floor": {}, "last_event": {}, "history": {}},
             oom_events={"app": ev_floor_off},
             oom_eligible=True,
+            health_gate_enabled=False,
             oom_floor_enabled=False,
         )
     _check("[floor-off] limit bumped this sync (immediate help)",
@@ -3455,12 +3465,13 @@ def section_oom_slow_path() -> None:
         cpu_limit_m=400, memory_limit_bytes=200 * M,
     )
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_low):
-        payload6, anns6 = _build_containers_payload(
+        payload6, anns6, _held = _build_containers_payload(
             rec, cfg,
             oom_state={"floor": {"app": 900 * M}, "last_event": {},
                        "history": {}},
             oom_events={},
             oom_eligible=True,
+            health_gate_enabled=False,
             oom_floor_enabled=False,
         )
     # Without the floor: recommendation = Prom-driven 200Mi. With it
@@ -3476,7 +3487,7 @@ def section_oom_slow_path() -> None:
     # fresh OOM lands in the same sync, dedupe sees an empty
     # last_event so the bump fires regardless of what the prior was.
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_values):
-        payload7, anns7 = _build_containers_payload(
+        payload7, anns7, _held = _build_containers_payload(
             rec, cfg,
             oom_state={
                 "floor": {"app": 900 * M},
@@ -3485,6 +3496,7 @@ def section_oom_slow_path() -> None:
             },
             oom_events={},
             oom_eligible=True,
+            health_gate_enabled=False,
             oom_floor_reset=True,
         )
     _check("[floor-reset] no event + reset → all OOM annotations cleared",
@@ -3500,7 +3512,7 @@ def section_oom_slow_path() -> None:
         trap_limit_bytes=64 * M,
     )
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_values):
-        payload8, anns8 = _build_containers_payload(
+        payload8, anns8, _held = _build_containers_payload(
             rec, cfg,
             oom_state={
                 "floor": {"app": 900 * M},
@@ -3509,6 +3521,7 @@ def section_oom_slow_path() -> None:
             },
             oom_events={"app": ev_after_reset},
             oom_eligible=True,
+            health_gate_enabled=False,
             oom_floor_reset=True,
         )
     _check("[floor-reset] reset + fresh OOM → new floor (96Mi, not 900Mi)",
@@ -3520,7 +3533,7 @@ def section_oom_slow_path() -> None:
 
     # Reset + floor disabled: floor stays cleared (no new sticky), bump still applies.
     with patch("src.writeback_webhook._query_prom_values", return_value=prom_values):
-        payload9, anns9 = _build_containers_payload(
+        payload9, anns9, _held = _build_containers_payload(
             rec, cfg,
             oom_state={
                 "floor": {"app": 900 * M},
@@ -3529,6 +3542,7 @@ def section_oom_slow_path() -> None:
             },
             oom_events={"app": ev_after_reset},
             oom_eligible=True,
+            health_gate_enabled=False,
             oom_floor_enabled=False,
             oom_floor_reset=True,
         )
@@ -3600,7 +3614,7 @@ def section_oom_slow_path() -> None:
         "history":    {"app": "from=128Mi to=256Mi factor=2.0"},
         "containers": {},  # no prior res (forces non-grow-shrink path)
     }
-    _payload, annotations = _bcp(
+    _payload, annotations, _held = _bcp(
         rec_after_rename, cfg_simple,
         oom_state=prior_state, oom_events={}, oom_eligible=True,
         oom_floor_enabled=True, oom_floor_reset=False,
@@ -3617,7 +3631,7 @@ def section_oom_slow_path() -> None:
         target_kind="Deployment", target_name="api",
         containers=[_CR(container_name="app")],
     )
-    _payload, annotations = _bcp(
+    _payload, annotations, _held = _bcp(
         rec_kept, cfg_simple,
         oom_state=prior_state, oom_events={}, oom_eligible=True,
         oom_floor_enabled=True, oom_floor_reset=False,
@@ -5427,7 +5441,7 @@ def section_create_mr_bucketing() -> None:
                     "cpu_request_m": 200, "memory_request_bytes": 100*1024*1024,
                     "cpu_limit_m": 400, "memory_limit_bytes": 300*1024*1024,
                 })()):
-        entries = _build_entries([(rec_long_clean, cfg_simple)])
+        entries, _held = _build_entries([(rec_long_clean, cfg_simple)])
     _check("[cr-name-D12-under] cr_name=60 chars (no collision) → entry kept",
            len(entries), 1)
 
@@ -5449,7 +5463,7 @@ def section_create_mr_bucketing() -> None:
                     "cpu_request_m": 200, "memory_request_bytes": 100*1024*1024,
                     "cpu_limit_m": 400, "memory_limit_bytes": 300*1024*1024,
                 })()):
-        entries = _build_entries([(rec_long_dep, cfg_simple), (rec_long_ss, cfg_simple)])
+        entries, _held = _build_entries([(rec_long_dep, cfg_simple), (rec_long_ss, cfg_simple)])
     _check("[cr-name-D12-overflow] cr_name>63 chars (kind-prefixed) → workloads skipped",
            entries, [])
 
@@ -5572,7 +5586,8 @@ def section_dry_run_bucketing() -> None:
     def _run(entries, global_dry):
         captured.clear()
         with _patch("src.writeback_webhook._commit_repo", side_effect=_fake_commit), \
-             _patch("src.writeback_webhook._build_entries", return_value=entries):
+             _patch("src.writeback_webhook._build_entries",
+                    return_value=(entries, [])):
             # Non-empty so the early `if not workloads_with_configs` guard is
             # passed; the content is ignored because _build_entries is patched.
             return write_back_webhook_all(
@@ -5624,7 +5639,7 @@ def section_dry_run_bucketing() -> None:
         "cpu_request_m": 200, "memory_request_bytes": 100 * 1024 * 1024,
         "cpu_limit_m": 400, "memory_limit_bytes": 300 * 1024 * 1024})()
     with _patch("src.writeback_webhook._query_prom_values", return_value=mock_prom):
-        entries = _build_entries([(rec_a, _cfg(True)), (rec_b, _cfg(False))])
+        entries, _held = _build_entries([(rec_a, _cfg(True)), (rec_b, _cfg(False))])
     api_e = next((e for e in entries if e.cr_name == "api"), None)
     worker_e = next((e for e in entries if e.cr_name == "worker"), None)
     _check("[dry-run-stamp] cfg.dry_run=True → entry.dry_run=True",
@@ -6102,7 +6117,7 @@ def section_cr_name_collision() -> None:
         (_rec("StatefulSet", "worker"), _cfg()),
     ]
     with patch("src.writeback_webhook._query_prom_values", return_value=prom):
-        entries = _build_entries(pairs_clean)
+        entries, _held = _build_entries(pairs_clean)
     cr_names = sorted(e.cr_name for e in entries)
     _check("[collision-clean] no collision → bare names preserved",
            cr_names, ["api", "worker"])
@@ -6113,7 +6128,7 @@ def section_cr_name_collision() -> None:
         (_rec("StatefulSet", "shared"), _cfg()),
     ]
     with patch("src.writeback_webhook._query_prom_values", return_value=prom):
-        entries = _build_entries(pairs_collide)
+        entries, _held = _build_entries(pairs_collide)
     cr_names = sorted(e.cr_name for e in entries)
     _check("[collision] both renamed with kind prefix",
            cr_names, ["deployment-shared", "statefulset-shared"])
@@ -6128,7 +6143,7 @@ def section_cr_name_collision() -> None:
         (_rec("StatefulSet", "queue"), _cfg()),
     ]
     with patch("src.writeback_webhook._query_prom_values", return_value=prom):
-        entries = _build_entries(pairs_mixed)
+        entries, _held = _build_entries(pairs_mixed)
     cr_names = sorted(e.cr_name for e in entries)
     _check("[collision-mixed] non-colliders keep bare name, colliders prefixed",
            cr_names, ["api", "deployment-shared", "queue", "statefulset-shared"])
@@ -6139,7 +6154,7 @@ def section_cr_name_collision() -> None:
         (_rec("StatefulSet", "shared", ns="ns-b"), _cfg()),
     ]
     with patch("src.writeback_webhook._query_prom_values", return_value=prom):
-        entries = _build_entries(pairs_xns)
+        entries, _held = _build_entries(pairs_xns)
     cr_names = sorted((e.namespace, e.cr_name) for e in entries)
     _check("[collision-xns] same name in different namespaces is NOT a collision",
            cr_names, [("ns-a", "shared"), ("ns-b", "shared")])
@@ -7115,11 +7130,12 @@ def section_cold_start_cpu_floor() -> None:
 
     # No Prom history: _query_prom_values returns None → cold-start path runs.
     with patch("src.writeback_webhook._query_prom_values", return_value=None):
-        payload, _ = _build_containers_payload(
+        payload, _, _held = _build_containers_payload(
             rec, cfg_zero_floor,
             oom_state={"floor": {}, "last_event": {}, "history": {}, "containers": {}},
             oom_events={"app": ev},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
 
     # ── Positive assert (MUST FAIL pre-fix) ─────────────────────────────────
@@ -7153,11 +7169,12 @@ def section_cold_start_cpu_floor() -> None:
         cr_writeback=CrWritebackConfig(repo_url="https://x", path="overrides"),
     )
     with patch("src.writeback_webhook._query_prom_values", return_value=None):
-        payload2, _ = _build_containers_payload(
+        payload2, _, _held = _build_containers_payload(
             rec, cfg_large_floor,
             oom_state={"floor": {}, "last_event": {}, "history": {}, "containers": {}},
             oom_events={"app": ev},
             oom_eligible=True,
+            health_gate_enabled=False,
         )
 
     assert payload2, "Expected non-empty payload (large-floor control)"
@@ -7173,11 +7190,12 @@ def section_cold_start_cpu_floor() -> None:
     # Confirms we do not accidentally activate cold-start synthesis on normal
     # (non-OOM) workloads with no Prom data. Payload should be empty (no data).
     with patch("src.writeback_webhook._query_prom_values", return_value=None):
-        payload3, _ = _build_containers_payload(
+        payload3, _, _held = _build_containers_payload(
             rec, cfg_zero_floor,
             oom_state={"floor": {}, "last_event": {}, "history": {}, "containers": {}},
             oom_events={},              # no OOM events
             oom_eligible=True,
+            health_gate_enabled=False,
         )
     _check(
         "[cold-start-no-oom-no-synthesis] without a fresh OOM event, "
@@ -7309,6 +7327,7 @@ def section_oom_bump_clamp_warning() -> None:
                 oom_state={"floor": {}, "last_event": {}, "history": {}},
                 oom_events={"app": ev_clamped},
                 oom_eligible=True,
+                health_gate_enabled=False,
             )
     finally:
         wh_logger.removeHandler(handler)
@@ -7352,6 +7371,7 @@ def section_oom_bump_clamp_warning() -> None:
                 oom_state={"floor": {}, "last_event": {}, "history": {}},
                 oom_events={"app": ev_fits},
                 oom_eligible=True,
+                health_gate_enabled=False,
             )
     finally:
         wh_logger.removeHandler(handler2)
@@ -8501,11 +8521,16 @@ def section_typo_warning_known_keys() -> None:
     import io as _io
     from src.overrides import KNOWN_KEYS, _KEY_SPEC, parse_annotations, ANNOTATION_PREFIX
 
-    # Verify the invariant this bug depends on: all 7 behaviour keys are in
-    # KNOWN_KEYS but NOT in _KEY_SPEC (that is the precondition for the bug).
+    # Verify the invariant this bug depends on: the behaviour-marker keys are
+    # in KNOWN_KEYS but NOT in _KEY_SPEC (that is the precondition for the
+    # bug). Asserted by name rather than by count so adding a marker key
+    # doesn't fail this section for an unrelated reason.
     behaviour_only = KNOWN_KEYS - set(_KEY_SPEC.keys())
-    _check("[typo-warn-precondition] KNOWN_KEYS has 7 keys absent from _KEY_SPEC",
-           len(behaviour_only), 7)
+    _check("[typo-warn-precondition] behaviour markers are in KNOWN_KEYS but "
+           "absent from _KEY_SPEC",
+           sorted(behaviour_only),
+           ["autoRollout", "enabled", "healthGateEnabled", "oomDetectionEnabled",
+            "oomFloorEnabled", "oomFloorReset", "skip", "skipContainers"])
 
     # Capture WARNING log output from src.overrides.
     log_buf = _io.StringIO()
@@ -10593,7 +10618,7 @@ def section_health_gate() -> None:
     admission webhook re-applies the stored CR values on every restart without
     ever recomputing, the undersizing was self-sustaining.
 
-    The fix must ALSO avoid the chart-1.14.0 trap documented in `main.cmd_sync`:
+    The fix must ALSO avoid the trap documented in `main.cmd_sync`:
     dropping the workload from `entries` deletes its CR doc, ArgoCD prunes the
     CR, and pods silently fall back to deployment-spec resources. So a held
     workload has to keep flowing through and emit the values already in the
