@@ -4,18 +4,7 @@ Release history for `kube-resource-updater`. Pending work lives in [ROADMAP.md](
 
 ---
 
-## Unreleased
-
-- **Date:** 2026-08-01
-- **Chart tag:** not bumped — no release cut from this change yet
-- **Image digest:** n/a — not released
-- **Cluster commit:** n/a — not deployed
-- **Live-test result:** n/a. The only cluster this tool ran on removed it on
-  2026-07-20 as the incident response below, so there is no environment to
-  live-test against. Verified offline: full QA suite green (62 new asserts in
-  `section_health_gate`), `ruff` clean, `helm lint` + ConfigMap render green.
-  The gate needs a live run against a real Prometheus + kube-state-metrics
-  before a release is cut from it.
+## 0.1.5 — Sample-quality gates: don't size from an untrustworthy window (2026-08-01)
 
 **Fixed — recommendations computed from unhealthy pods.**
 
@@ -54,6 +43,18 @@ open gap in [ROADMAP.md](ROADMAP.md).
 New config, all per-namespace and per-workload overridable through the usual
 `helm < namespace < workload` hierarchy: `config.healthGateEnabled`,
 `config.maxRestartsInWindow`, `config.minSampleCoverage`.
+
+**Not yet live-validated.** The cluster this ran on removed the tool as the
+response to the incident above, so this release was verified offline only: the
+full QA suite (62 new asserts in `section_health_gate`, including a replay of
+the incident through `_build_containers_payload`), `ruff`, `helm lint`, and the
+ConfigMap render. The shapes that only a real backend can confirm — the label
+set on `kube_pod_container_status_restarts_total`, `count_over_time` against
+real retention and scrape gaps, the *Held back* table in a real MR — have not
+been exercised. The two thresholds are reasoned defaults, not measured ones:
+`maxRestartsInWindow: 3` treats a single eviction or node drain in a multi-day
+window as noise, and `minSampleCoverage: 0.25` is ~2 days of history at the
+default 8d memory window. Expect to tune both against your own cluster.
 
 ## 0.1.4 — GitHub App authentication (alpha) (2026-06-21)
 

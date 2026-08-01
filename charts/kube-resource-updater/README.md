@@ -37,7 +37,7 @@ The chart is published to GHCR as an OCI artifact; the default `image.repository
 
 ```console
 helm install kube-resource-updater \
-  oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater --version 0.1.4 \
+  oci://ghcr.io/mateus-gsilva/charts/kube-resource-updater --version 0.1.5 \
   --namespace kube-resource-updater --create-namespace \
   --values my-values.yaml
 ```
