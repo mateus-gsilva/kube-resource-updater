@@ -4,6 +4,57 @@ Release history for `kube-resource-updater`. Pending work lives in [ROADMAP.md](
 
 ---
 
+## Unreleased
+
+- **Date:** 2026-08-01
+- **Chart tag:** not bumped — no release cut from this change yet
+- **Image digest:** n/a — not released
+- **Cluster commit:** n/a — not deployed
+- **Live-test result:** n/a. The only cluster this tool ran on removed it on
+  2026-07-20 as the incident response below, so there is no environment to
+  live-test against. Verified offline: full QA suite green (62 new asserts in
+  `section_health_gate`), `ruff` clean, `helm lint` + ConfigMap render green.
+  The gate needs a live run against a real Prometheus + kube-state-metrics
+  before a release is cut from it.
+
+**Fixed — recommendations computed from unhealthy pods.**
+
+A workload entered a crash loop; the sync ran while it was looping and computed
+its CPU/memory percentiles from the resulting failed-startup bursts instead of
+steady-state usage. Nothing checked whether the source pods were healthy during
+the sample window, or how many samples backed a percentile, so the math ran on
+the noise and produced a `ResourceOverride` far too small for the real workload.
+Because the admission webhook re-applies the stored CR values on every restart
+and never recomputes, the undersizing sustained itself — throttling and
+OOM-adjacent restarts every few minutes, indefinitely.
+
+Two gates now run per container **before** the value queries:
+
+- **Crash-loop** — `increase(kube_pod_container_status_restarts_total[window])`
+  over the widest request window, held above `config.maxRestartsInWindow`
+  (default 3). Window-scoped on purpose: the live pod API's `restartCount` is
+  cumulative over the container's lifetime and vanishes with the pod.
+- **Data sufficiency** — `count_over_time` mirroring the request queries' own
+  series and subquery step, held below `config.minSampleCoverage` (default
+  0.25) of the window's evaluation points.
+
+When either trips, the workload keeps flowing through the write-back layer and
+re-emits the values already committed to its `ResourceOverride`. It is **not**
+skipped — skipping would drop the CR doc from the rebuilt file, ArgoCD would
+prune the CR, and the workload's pods would fall back to deployment-spec
+resources. A container with no committed CR yet is omitted instead. OOM bumps
+still apply to a held container (they read the trap limit from the pod spec,
+not from Prometheus). Every hold logs `[health-hold]` at WARNING and appears in
+a **Held back** table in the MR description.
+
+Both gates fail open when their metric is absent — the crash-loop one warns
+once per sync that it is inert without kube-state-metrics. Registered as an
+open gap in [ROADMAP.md](ROADMAP.md).
+
+New config, all per-namespace and per-workload overridable through the usual
+`helm < namespace < workload` hierarchy: `config.healthGateEnabled`,
+`config.maxRestartsInWindow`, `config.minSampleCoverage`.
+
 ## 0.1.4 — GitHub App authentication (alpha) (2026-06-21)
 
 - **GitHub App authentication** for the `github` provider — an alternative to a

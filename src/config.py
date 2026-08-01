@@ -130,6 +130,21 @@ class ResourceConfig:
     # immediate CPU throttle and readiness failure on restart.
     # Configurable via env COLD_START_CPU_FLOOR_M or ConfigMap coldStartCpuFloorM.
     cold_start_cpu_floor_m: int = 10
+    # Sample-quality gates (see src/health.py). When a workload's pods were
+    # crash-looping during the sample window, or the percentile is backed by
+    # too few points, the recommendation is NOT recomputed and the values
+    # already committed to the CR are preserved.
+    health_gate_enabled: bool = True
+    # Restarts tolerated inside the widest request window before the
+    # recommendation is held. One eviction, node drain or isolated OOM in a
+    # multi-day window is noise; three is a pattern. 0 disables the gate.
+    max_restarts_in_window: int = 3
+    # Fraction of the window's evaluation points that must carry data before
+    # a percentile is trusted. At the default 8d memory window this means
+    # ~2 days of history — enough to reject the "deployed 20 minutes ago"
+    # case without holding back workloads that have genuinely been running
+    # for a couple of days. 0 disables the gate.
+    min_sample_coverage: float = 0.25
 
     @property
     def effective_cpu_request_margin(self) -> float:
@@ -195,6 +210,10 @@ class ResourceConfig:
             oom_floor_enabled=_bool(
                 os.environ.get("OOM_FLOOR_ENABLED", "true"), default=True),
             cold_start_cpu_floor_m=_int_bound(d.get("coldStartCpuFloorM", 10), default=10, field="coldStartCpuFloorM"),
+            health_gate_enabled=_bool(d.get("healthGateEnabled", True), default=True),
+            max_restarts_in_window=_int_bound(
+                d.get("maxRestartsInWindow", 3), default=3, field="maxRestartsInWindow"),
+            min_sample_coverage=float(d.get("minSampleCoverage", "0.25")),
         )
 
     @classmethod
@@ -227,6 +246,9 @@ class ResourceConfig:
             ),
             oom_floor_enabled=os.environ.get("OOM_FLOOR_ENABLED", "true").lower() in ("1", "true", "yes"),
             cold_start_cpu_floor_m=int(os.environ.get("COLD_START_CPU_FLOOR_M", "10")),
+            health_gate_enabled=os.environ.get("HEALTH_GATE_ENABLED", "true").lower() in ("1", "true", "yes"),
+            max_restarts_in_window=int(os.environ.get("MAX_RESTARTS_IN_WINDOW", "3")),
+            min_sample_coverage=float(os.environ.get("MIN_SAMPLE_COVERAGE", "0.25")),
         )
 
 
@@ -393,6 +415,7 @@ class Config:
             ("cpu_limit_multiplier",    "config.cpuLimitMultiplier",   1.0, 100.0),
             ("memory_limit_multiplier", "config.memoryLimitMultiplier",1.0, 100.0),
             ("oom_bump_factor",         "config.oomBumpFactor",        1.0, 10.0),
+            ("min_sample_coverage",     "config.minSampleCoverage",    0.0, 1.0),
         ]:
             val = getattr(rc, attr)
             if val is None:

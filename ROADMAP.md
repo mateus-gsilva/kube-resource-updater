@@ -8,6 +8,13 @@ reference: [docs/reference.md](docs/reference.md).
 
 ---
 
+## Confirmed bugs
+
+| | Item |
+|---|---|
+| 🟡 | **Crash-loop gate is inert without kube-state-metrics.** The gate added for the 2026-07-20 undersizing incident reads `kube_pod_container_status_restarts_total`. On a cluster without kube-state-metrics the query returns no data, the gate fails open, and a workload can still be sized from a crash-looping pod's samples — the tool warns once per sync but cannot stop it. The coverage gate still applies (it uses cAdvisor series the tool already requires) and catches the short-history subset of the same failure, so this is a partial gap, not a full regression. Closing it means a second, kubelet-only restart signal. |
+| 🟡 | **Grow/shrink has no baseline when both OOM detection and the health gate are disabled.** `_apply_grow_shrink` compares against the live CR's container resources, which only reach the build phase via `fetch_oom_state`. `cmd_sync` calls that when either `oomDetectionEnabled` or `healthGateEnabled` resolves true — so with both off, `growOnly` / `shrinkOnly` silently no-op instead of clamping. The CR-state fetch should not be conditional on either feature. |
+
 ## Known gaps (0.x series)
 
 | | Item |

@@ -243,6 +243,48 @@ config:
   ## @param config.oomFloorEnabled Make OOM bumps sticky via `oom-floor.<container>` annotation
   oomFloorEnabled: true
 
+  ## Sample-quality gates. A percentile is only a recommendation when the
+  ## samples in the window describe the workload doing its job. Two cases
+  ## where they don't:
+  ##
+  ##   1. The source pods were crash-looping. What's in the window is a
+  ##      series of failed startups, and the percentile of that sizes the
+  ##      workload far too small. Since the admission webhook re-applies
+  ##      the stored CR values on every restart and never recomputes, an
+  ##      undersized CR keeps the workload restarting — the loop does not
+  ##      break on its own.
+  ##   2. There were barely any samples — workload deployed minutes ago,
+  ##      Prometheus outage, retention shorter than the window.
+  ##
+  ## When a gate trips, the recommendation is NOT recomputed and the values
+  ## already committed to the ResourceOverride are kept unchanged (the CR is
+  ## never removed — that would make ArgoCD prune it and drop the workload's
+  ## pods back to their deployment-spec resources). A container with no
+  ## committed CR yet is omitted instead. Every hold is logged as
+  ## `[health-hold]` and listed in the MR description.
+  ##
+  ## The crash-loop gate reads `kube_pod_container_status_restarts_total`,
+  ## so it needs kube-state-metrics. Without it the gate is inert and logs a
+  ## warning once per sync — it fails open rather than freezing every
+  ## workload in the cluster.
+  ##
+  ## Per-workload override via the standard hierarchy
+  ## (workload > namespace > helm-default):
+  ##
+  ##   metadata.annotations:
+  ##     kube-resource-updater.healthGateEnabled: "false"
+  ##     kube-resource-updater.maxRestartsInWindow: "10"
+  ##     kube-resource-updater.minSampleCoverage: "0.5"
+  ##
+  ## @param config.healthGateEnabled Hold the recommendation when the sample window is untrustworthy
+  healthGateEnabled: true
+  ## @param config.maxRestartsInWindow Restarts tolerated inside the widest request window before holding (0 = gate off)
+  # one eviction / node drain / isolated OOM in a multi-day window is noise; three is a pattern
+  maxRestartsInWindow: 3
+  ## @param config.minSampleCoverage Fraction of the window's evaluation points that must carry data before a percentile is trusted (0 = gate off)
+  # 0.25 of the default 8d memory window is ~2 days of history
+  minSampleCoverage: "0.25"
+
   ## Comma-separated list of container names to leave alone — the sync
   ## loop will not include them on a ResourceOverride and the webhook
   ## therefore never patches them. Use it for service-mesh / observability

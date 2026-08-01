@@ -171,6 +171,9 @@ Opt-in is by Namespace annotation `kube-resource-updater.enabled: "true"`. Every
 | `config.oomDetectionEnabled` | Detect OOMKilled and bump memory at sync time | `true` |
 | `config.oomBumpFactor` | Multiplier on the limit at OOM time (1.5 = +50% headroom). Bumped value also stamped as the CR's `oom-floor` annotation. | `1.5` |
 | `config.oomFloorEnabled` | Make OOM bumps sticky via `oom-floor.<container>` annotation | `true` |
+| `config.healthGateEnabled` | Hold the recommendation when the sample window is untrustworthy | `true` |
+| `config.maxRestartsInWindow` | Restarts tolerated inside the widest request window before holding (0 = gate off) | `3` |
+| `config.minSampleCoverage` | Fraction of the window's evaluation points that must carry data before a percentile is trusted (0 = gate off) | `0.25` |
 | `config.skipContainers` | Comma-separated container names to skip cluster-wide | `""` |
 | `config.crWriteback.repoUrl` | Git repo URL where ResourceOverride CRs are committed (REQUIRED) | `""` |
 | `config.crWriteback.branch` | Branch within crWriteback.repoUrl (defaults to "main") | `main` |

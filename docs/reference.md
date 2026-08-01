@@ -22,6 +22,7 @@ enabling GitOps-driven rightsizing without Kubernetes VPA.
 12. [Annotations reference](#annotations-reference)
 13. [Configuration reference](#configuration-reference)
 14. [OOM-aware bumps](#oom-aware-bumps)
+15. [Sample-quality gates](#sample-quality-gates)
 15. [Credential resolution](#credential-resolution)
 15. [Effective config logging](#effective-config-logging)
 16. [Commands](#commands)
@@ -434,6 +435,13 @@ CronJob fires
 │    Applies the helm < ns < workload hierarchy to produce an effective Config
 │    Filters: skip / grow+shrink conflict / no containers / etc.
 │
+├─ Sample-quality gates (when healthGateEnabled)
+│    assess_container() per container, BEFORE the value queries
+│      query_restart_count over the widest request window
+│      query_cpu_sample_count / query_mem_sample_count over the
+│      request windows, at the same subquery step the percentiles use
+│    Held → preserve the values already committed to the CR
+│
 ├─ OOM-aware
 │    fetch_oom_state(opt-in namespaces)
 │      Lists CRs via apiserver, reads oom-floor / oom-last-event /
@@ -829,6 +837,7 @@ run normally, but no git operations are performed. Computed values are logged.
 | `kube-resource-updater.skip` | Workload only | `"true"` excludes this specific workload from sync + webhook patches. **Important:** if the workload previously had a CR managed by the tool, setting `skip` causes the next sync to REMOVE the CR from the file → ArgoCD prunes the CR → admission webhook stops patching → new pods admit with deployment-spec resources (whatever `resources:` is in the chart/manifest). If you want to keep the existing CR frozen instead, use `growOnly: "true"` + `shrinkOnly: "true"` together (freeze semantics). |
 | `kube-resource-updater.skipContainers` | Namespace OR workload | CSV of container names to leave alone (e.g. `"istio-proxy,linkerd-proxy"`). Init containers are always skipped automatically. An explicit empty string at workload-level clears an inherited namespace list. |
 | `kube-resource-updater.autoRollout` | Namespace OR workload | `"true"` makes the webhook stamp `kubectl.kubernetes.io/restartedAt` on the workload's PodTemplate when its CR changes, triggering a rolling restart. Hierarchy: workload > namespace > helm default. |
+| `kube-resource-updater.healthGateEnabled` | Namespace OR workload | Opt-out of the sample-quality gates (default `true` via helm). False = recompute the recommendation from the window even when the source pods were crash-looping or the percentile is backed by almost no samples. See [Sample-quality gates](#sample-quality-gates). |
 | `kube-resource-updater.oomDetectionEnabled` | Namespace OR workload | Opt-out of OOM-aware bumps for a specific workload (default `true` via helm). |
 | `kube-resource-updater.oomFloorEnabled` | Namespace OR workload | Makes OOM bumps **sticky** via `oom-floor.<container>` annotation on the CR (default `true`). False = one-shot bumps; the limit goes up this sync but no floor is recorded, so the next Prom-driven recommendation can drop the limit again. |
 | `kube-resource-updater.oomFloorReset` | Namespace OR workload | One-shot opt-in. `"true"` causes the next sync to clear `oom-floor.<c>` + `oom-last-event.<c>` + `oom-boost-history.<c>` for every container of every CR in scope. The tool does NOT auto-remove this annotation — operator deletes it manually after confirming the reset took effect. |
@@ -854,6 +863,8 @@ Every key in `config:` of [`values.yaml`](../charts/kube-resource-updater/values
 | `kube-resource-updater.growOnly` | bool | Only allow resources to increase this sync |
 | `kube-resource-updater.shrinkOnly` | bool | Only allow resources to decrease |
 | `kube-resource-updater.oomBumpFactor` | float | Multiplier applied to the limit at OOM time, default `"1.5"` |
+| `kube-resource-updater.maxRestartsInWindow` | int | Restarts tolerated inside the widest request window before the recommendation is held. Default `3`; `0` disables the gate |
+| `kube-resource-updater.minSampleCoverage` | float | Fraction of the window's evaluation points that must carry data before a percentile is trusted. Default `"0.25"`; `0` disables the gate |
 
 Unknown keys log a typo warning at sync time listing the known set. A malformed value (e.g. `oomBumpFactor: "yes"`) falls through to the next layer of the hierarchy rather than crashing.
 
@@ -963,6 +974,16 @@ Slow-path scans `pod.status.containerStatuses[*].lastState.terminated.reason == 
 
 The companion **`kube-resource-updater.oomFloorReset`** annotation (no helm default — explicit opt-in only) clears all OOM state for the next sync. See [Annotations reference](#annotations-reference).
 
+### Sample-quality gates
+
+Held workloads keep the values already committed to their `ResourceOverride`; the CR is never removed. Fully covered below in [Sample-quality gates](#sample-quality-gates).
+
+| Config key | Env var | Default | Description |
+|---|---|---|---|
+| `healthGateEnabled` | `HEALTH_GATE_ENABLED` | `true` | Hold the recommendation when the sample window is untrustworthy. Per-workload override via annotation. |
+| `maxRestartsInWindow` | `MAX_RESTARTS_IN_WINDOW` | `3` | Restarts tolerated inside the widest request window before holding. `0` disables the gate. |
+| `minSampleCoverage` | `MIN_SAMPLE_COVERAGE` | `0.25` | Fraction of the window's evaluation points that must carry data. `0` disables the gate. |
+
 ### Other
 
 | Config key | Env var (deprecated) | Default | Description |
@@ -1050,6 +1071,52 @@ Then the bump path runs normally — the workload escapes the OOM loop on the fi
 - **`kube-resource-updater.oomDetectionEnabled: "false"`** — turn off OOM scanning for one workload that does its own memory management.
 - **`kube-resource-updater.oomFloorEnabled: "false"`** — keep detection on, but make bumps one-shot. Useful when Prometheus is the long-term source of truth and a sticky floor would block sizing-down after a code optimization.
 - **`kube-resource-updater.oomFloorReset: "true"`** — clear accumulated floor state once (e.g. after the workload was optimized). The tool does NOT auto-remove this annotation; the operator deletes it manually after confirming the reset took effect, otherwise every sync re-resets and blocks future bumps from accumulating.
+
+---
+
+## Sample-quality gates
+
+A percentile over a Prometheus window is only a recommendation when the samples in that window describe the workload doing its job. Two situations produce samples that describe something else:
+
+1. **The source pods were crash-looping.** What lands in the window is a series of failed startups — a burst of CPU while the process boots, then nothing, repeated. The percentile of that is not steady-state usage, and a request sized from it is far too small for the workload once it starts working.
+2. **There were barely any samples.** A workload deployed an hour before the sync, a Prometheus outage, retention shorter than the configured window. The percentile is computed; it just isn't backed by anything.
+
+Case 1 is self-sustaining. The admission webhook re-applies the stored CR values on every restart and never recomputes, so an undersized CR keeps the workload restarting, which keeps the samples bad. Nothing in the loop corrects it.
+
+### What the gates measure
+
+Both signals come from Prometheus, over the same window that feeds the percentile:
+
+| Gate | Query | Held when |
+|---|---|---|
+| Crash-loop | `max(increase(kube_pod_container_status_restarts_total{...}[window]))` over the **widest** request window | result > `maxRestartsInWindow` |
+| Data sufficiency | `count_over_time(...)` mirroring `query_cpu_request_m` / `query_mem_request_bytes` — same series, same subquery step | `samples / expected < minSampleCoverage` |
+
+The crash-loop gate deliberately does **not** read the live pod API's `restartCount`. That number is cumulative over the container's lifetime, so a workload that crash-looped a month ago and has been stable since would read as unhealthy forever; and it disappears with the pod, so a crash-looping replica that was already replaced leaves no trace even though its samples are still in the window.
+
+The coverage query mirrors the request query's subquery step (`[window:1m]` for CPU, `[window:5m]` for memory) because the number is only meaningful as "how many of the points that fed the percentile actually existed".
+
+### What happens when a gate trips
+
+The workload keeps flowing through the write-back layer and emits the values **already committed to its `ResourceOverride`**. It is not skipped: skipping would remove the workload from `entries`, the CR file rebuild would drop its doc, ArgoCD would prune the CR, the admission webhook would stop patching, and the workload's pods would silently fall back to whatever `resources:` is in the Deployment spec. Preserving the CR unchanged is the only outcome that keeps the workload sized while the tool declines to re-size it.
+
+A container with **no** committed CR yet is omitted instead — there is nothing to preserve and nothing to prune, and emitting the values the tool just decided not to trust is exactly how the failure starts.
+
+OOM bumps still apply to a held container. An OOM bump is driven by the trap limit read from the pod spec at kill time, not by Prometheus, so it stays trustworthy for a crash-looping workload and must not be gated away.
+
+Every hold is logged at WARNING as `[health-hold]` with the reason and the preserved values, and listed in a **Held back** table in the MR description so a reviewer can tell "nothing changed because usage is stable" apart from "nothing changed because the tool refused to trust the data".
+
+### Fail-open behaviour
+
+`kube_pod_container_status_restarts_total` comes from kube-state-metrics. On a cluster without it the query returns no data and the crash-loop gate is **inert**, with one WARNING per sync saying so. Holding every workload in the cluster because a metric is missing would be a worse regression than the bug the gate closes.
+
+The coverage gate fails open the same way: a container with no series at all also produces no request/limit values, and the existing "no Prometheus data" path already skips it.
+
+### Operator controls
+
+- **`kube-resource-updater.healthGateEnabled: "false"`** — size the workload from the current window regardless. Use it for a workload whose restarts are expected and unrelated to its sizing (a job runner that exits non-zero by design), where the gate would otherwise freeze the recommendation indefinitely.
+- **`kube-resource-updater.maxRestartsInWindow`** — raise for workloads that restart routinely; `"0"` turns the crash-loop gate off for that workload only.
+- **`kube-resource-updater.minSampleCoverage`** — raise to demand more history before trusting a percentile; `"0"` turns the coverage gate off.
 
 ---
 

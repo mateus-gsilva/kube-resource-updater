@@ -63,6 +63,10 @@ _cache: dict[tuple, int | None] = {}
 _mem_cache: dict[tuple, int | None] = {}
 _req_cpu_cache: dict[tuple, int | None] = {}
 _req_mem_cache: dict[tuple, int | None] = {}
+# Caches for the sample-quality gates (see src/health.py). Same in-process
+# lifetime as the value caches above.
+_restart_cache: dict[tuple, int | None] = {}
+_sample_count_cache: dict[tuple, int | None] = {}
 # Cache for detect_scrape_interval — keyed by prometheus_url.
 _scrape_interval_cache: dict[str, str] = {}
 
@@ -445,6 +449,158 @@ def query_mem_request_bytes(
     except Exception as exc:
         _log.warning("Prometheus memory request query failed (%s/%s): %s", namespace, container, exc)
         _req_mem_cache[key] = None
+        return None
+
+
+def query_restart_count(
+    prometheus_url: str,
+    namespace: str,
+    container: str,
+    target_name: str | None = None,
+    window: str = "3d",
+) -> int | None:
+    """Return the highest container restart count over the window, or None.
+
+    `increase()` over `kube_pod_container_status_restarts_total` is
+    window-scoped on purpose. The live pod API also carries
+    `container_status.restartCount`, but that number is cumulative over the
+    container's lifetime — a workload that crash-looped a month ago and has
+    been stable since would read as unhealthy forever. It also disappears
+    with the pod, so a crash-looping replica that was already replaced
+    leaves no trace, even though its samples are still in the window that
+    feeds the percentile.
+
+    `max()` (not `sum()`) across replicas: one bad replica is enough to
+    poison the per-step `max by(namespace, container)` the request
+    percentiles are built on, and summing would scale the number with the
+    replica count.
+
+    None means the series is absent — most commonly no kube-state-metrics
+    in the cluster. Callers must treat that as "unknown", not as zero.
+    """
+    if not prometheus_url:
+        return None
+
+    key = (prometheus_url, namespace, container, target_name, window)
+    if key in _restart_cache:
+        return _restart_cache[key]
+
+    ns_e = _escape_label_value(namespace)
+    c_e = _escape_label_value(container)
+    pod_filter = f',pod=~"{_escape_label_regex(target_name)}-.*"' if target_name else ""
+    query = (
+        f"max(increase(kube_pod_container_status_restarts_total"
+        f'{{namespace="{ns_e}",container="{c_e}"{pod_filter}}}[{window}]))'
+    )
+    try:
+        resp = requests.get(f"{prometheus_url}/api/v1/query", params={"query": query}, timeout=30)
+        resp.raise_for_status()
+        results = resp.json().get("data", {}).get("result", [])
+        if not results:
+            _restart_cache[key] = None
+            return None
+        result = round(max(float(r["value"][1]) for r in results))
+        _restart_cache[key] = result
+        return result
+    except Exception as exc:
+        _log.warning("Prometheus restart-count query failed (%s/%s): %s", namespace, container, exc)
+        _restart_cache[key] = None
+        return None
+
+
+def query_cpu_sample_count(
+    prometheus_url: str,
+    namespace: str,
+    container: str,
+    target_name: str | None = None,
+    window: str = "3d",
+) -> int | None:
+    """Return how many subquery steps carried CPU data over the window.
+
+    Deliberately mirrors `query_cpu_request_m`'s inner expression and its
+    `[window:1m]` step — the number is only meaningful as "how many of the
+    points that fed the percentile actually existed". Measuring coverage at
+    a different resolution than the percentile would answer a different
+    question.
+    """
+    if not prometheus_url:
+        return None
+
+    key = ("cpu", prometheus_url, namespace, container, target_name, window)
+    if key in _sample_count_cache:
+        return _sample_count_cache[key]
+
+    ns_e = _escape_label_value(namespace)
+    c_e = _escape_label_value(container)
+    pod_filter = f',pod=~"{_escape_label_regex(target_name)}-.*"' if target_name else ""
+    query = (
+        f"count_over_time("
+        f"max by(namespace, container)("
+        f"rate(container_cpu_usage_seconds_total"
+        f'{{namespace="{ns_e}",container="{c_e}"{pod_filter}}}[1m])'
+        f")[{window}:1m])"
+    )
+    return _run_sample_count_query(prometheus_url, namespace, container, query, key)
+
+
+def query_mem_sample_count(
+    prometheus_url: str,
+    namespace: str,
+    container: str,
+    target_name: str | None = None,
+    window: str = "8d",
+) -> int | None:
+    """Return how many subquery steps carried memory data over the window.
+
+    Mirrors `query_mem_request_bytes`' inner expression and `[window:5m]`
+    step for the same reason as `query_cpu_sample_count`.
+    """
+    if not prometheus_url:
+        return None
+
+    key = ("mem", prometheus_url, namespace, container, target_name, window)
+    if key in _sample_count_cache:
+        return _sample_count_cache[key]
+
+    ns_e = _escape_label_value(namespace)
+    c_e = _escape_label_value(container)
+    pod_filter = f',pod=~"{_escape_label_regex(target_name)}-.*"' if target_name else ""
+    query = (
+        f"count_over_time("
+        f"max by(namespace, container)("
+        f"container_memory_working_set_bytes"
+        f'{{namespace="{ns_e}",container="{c_e}"{pod_filter}}}'
+        f")[{window}:5m])"
+    )
+    return _run_sample_count_query(prometheus_url, namespace, container, query, key)
+
+
+def _run_sample_count_query(
+    prometheus_url: str,
+    namespace: str,
+    container: str,
+    query: str,
+    cache_key: tuple,
+) -> int | None:
+    """Shared execution for the two coverage queries.
+
+    None on no-data or error. A container with no series at all also
+    produces no request/limit values, so the existing "no Prom data" path
+    already skips it — the coverage gate does not need to duplicate that.
+    """
+    try:
+        resp = requests.get(f"{prometheus_url}/api/v1/query", params={"query": query}, timeout=30)
+        resp.raise_for_status()
+        results = resp.json().get("data", {}).get("result", [])
+        if not results:
+            _sample_count_cache[cache_key] = None
+            return None
+        result = round(max(float(r["value"][1]) for r in results))
+        _sample_count_cache[cache_key] = result
+        return result
+    except Exception as exc:
+        _log.warning("Prometheus sample-count query failed (%s/%s): %s", namespace, container, exc)
+        _sample_count_cache[cache_key] = None
         return None
 
 

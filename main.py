@@ -349,17 +349,35 @@ def cmd_sync(args: argparse.Namespace) -> int:
         oom_eligibility_lookup: dict = {}
         oom_floor_enabled_lookup: dict = {}
         oom_floor_reset_lookup: dict = {}
+        opt_in_namespaces = [t.name for t in targets]
+
+        # 4a. Sample-quality gates. Resolved per workload through the same
+        # hierarchy as the OOM knobs. When the gate holds a workload, the
+        # write-back layer re-emits the values already committed to its CR,
+        # so the live CR state has to be on hand even when OOM-aware is off
+        # — hence the fetch below is gated on either feature.
+        from src.overrides import is_health_gate_enabled
+        health_gate_lookup = {
+            (rec.namespace, rec.target_name): is_health_gate_enabled(
+                cfg.resource.health_gate_enabled,
+                ns_by_name[rec.namespace].annotations,
+                rec.annotations,
+            )
+            for rec, _ in pairs
+        }
+
+        if cfg.resource.oom_detection_enabled or any(health_gate_lookup.values()):
+            from src.writeback_webhook import fetch_oom_state
+            co_api = client.CustomObjectsApi()
+            oom_state_lookup = fetch_oom_state(co_api, opt_in_namespaces)
+
         if cfg.resource.oom_detection_enabled:
-            from src.writeback_webhook import detect_oom_events, fetch_oom_state
+            from src.writeback_webhook import detect_oom_events
             from src.overrides import (
                 is_oom_detection_enabled,
                 is_oom_floor_enabled,
                 is_oom_floor_reset_requested,
             )
-
-            opt_in_namespaces = [t.name for t in targets]
-            co_api = client.CustomObjectsApi()
-            oom_state_lookup = fetch_oom_state(co_api, opt_in_namespaces)
 
             # Build the per-workload eligibility map upfront. Only workloads
             # whose effective resolver says YES participate in bumping;
@@ -430,6 +448,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             oom_eligibility_lookup=oom_eligibility_lookup,
             oom_floor_enabled_lookup=oom_floor_enabled_lookup,
             oom_floor_reset_lookup=oom_floor_reset_lookup,
+            health_gate_lookup=health_gate_lookup,
             auto_rollout_by_namespace=auto_rollout_by_namespace,
         )
 
