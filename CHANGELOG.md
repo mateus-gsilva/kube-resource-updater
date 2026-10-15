@@ -77,6 +77,10 @@ sync instead of computing them.
   error instead of a traceback that crash-looped the Job.
 - A per-workload `dryRun` workload's committed CR doc was dropped from the
   rebuilt namespace file, so the GitOps engine pruned its CR.
+- gitops mode rendered a namespace whose live CRs could not be read without its
+  baseline (cooldown, growOnly / shrinkOnly, change cap). That namespace's
+  committed file is now left untouched for the sync — not rewritten, not
+  pruned — with a warning.
 - Docs: one install per cluster (the "central multi-cluster CronJob" wording was
   stale); orphan-cleanup scope; GitHub provider status (token auth + PR flow
   validated, GitHub App auth still alpha).

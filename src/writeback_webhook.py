@@ -339,6 +339,15 @@ def write_back_webhook_all(
             adopt_foreign=adopt_foreign_crs,
         )
 
+    # A namespace whose live CRs could not be read has no baseline (cooldown,
+    # growOnly / shrinkOnly, change cap): its committed file is left exactly
+    # as it is this sync — not re-rendered and not pruned.
+    unreadable = set(prune_scope.unreadable_namespaces) if prune_scope else set()
+    for ns in sorted({e.namespace for e in entries} & unreadable):
+        _log.warning("[gitops] live ResourceOverrides in %s could not be read — leaving its "
+                     "committed file untouched this sync (no baseline to compare against)", ns)
+    entries = [e for e in entries if e.namespace not in unreadable]
+
     dry_entries = [e for e in entries if e.dry_run or dry_run]
     write_entries = [e for e in entries if not (e.dry_run or dry_run)]
 
@@ -376,6 +385,7 @@ def write_back_webhook_all(
         auto_rollout_by_namespace=auto_rollout_by_namespace,
         held_report=held_report,
         preserve_entries=dry_entries,
+        untouched_namespaces=unreadable,
     )
     return results or None
 
@@ -2467,8 +2477,11 @@ def _commit_repo(
     auto_rollout_by_namespace: "dict[str, bool] | None" = None,
     held_report: "list[HeldContainer] | None" = None,
     preserve_entries: "list[WebhookEntry] | None" = None,
+    untouched_namespaces: "set[str] | None" = None,
 ) -> list[tuple[str, list[str]]]:
     """Clone the repo, bucket-split entries by per-workload `create_mr`, push.
+
+    Files of `untouched_namespaces` are neither written nor pruned.
 
     `preserve_entries` (per-workload dryRun) are never written, but their
     committed docs are carried forward verbatim and their files are not
@@ -2552,7 +2565,8 @@ def _commit_repo(
                 old_docs=old_docs,
                 preserve_entries=mr_entries + keep,
             )
-            deleted = _prune_orphan_files(repo_dir, entries + keep, path) if not mr_entries else []
+            deleted = _prune_orphan_files(repo_dir, entries + keep, path,
+                                          untouched_namespaces=untouched_namespaces) if not mr_entries else []
             _log_entry_deltas(direct_entries, old_docs, path)
 
             if changed or deleted:
@@ -2611,7 +2625,8 @@ def _commit_repo(
                 old_docs=old_docs,
                 preserve_entries=keep,
             )
-            deleted = _prune_orphan_files(repo_dir, entries + keep, path)
+            deleted = _prune_orphan_files(repo_dir, entries + keep, path,
+                                          untouched_namespaces=untouched_namespaces)
             _log_entry_deltas(mr_entries, old_docs, path)
 
             if changed or deleted:
@@ -2826,7 +2841,8 @@ def _write_namespace_files(
     return changed
 
 
-def _prune_orphan_files(repo_dir: str, entries: list[WebhookEntry], path: str) -> list[str]:
+def _prune_orphan_files(repo_dir: str, entries: list[WebhookEntry], path: str,
+                        untouched_namespaces: "set[str] | None" = None) -> list[str]:
     """Delete any tool-managed CR file the current run did not write to.
 
     Two scenarios this covers:
@@ -2851,6 +2867,8 @@ def _prune_orphan_files(repo_dir: str, entries: list[WebhookEntry], path: str) -
         return []
 
     expected_files: set[str] = {_cr_relpath(e, path) for e in entries}
+    untouched = set(untouched_namespaces or ())
+    expected_files |= {f"{path}/{ns}{CR_FILE_SUFFIX}" for ns in untouched}
     yaml = YAML()
     pruned: list[str] = []
 
@@ -2875,6 +2893,8 @@ def _prune_orphan_files(repo_dir: str, entries: list[WebhookEntry], path: str) -
     for entry in sorted(os.listdir(base)):
         full = os.path.join(base, entry)
         if os.path.isdir(full):
+            if entry in untouched:
+                continue  # legacy per-namespace folder of an untouched namespace
             for fname in sorted(os.listdir(full)):
                 if not fname.endswith(".yaml"):
                     continue

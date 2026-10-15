@@ -113,6 +113,7 @@ Run:
 #   section_emit_cpu_limits_empty_limits          emitCpuLimits — explicit empty limits remove the pod's CPU limit
 #   section_restart_query_retry                   restart-count query — retry once, distinguish query-error from no-series
 #   section_direct_delete_paths                   direct mode — every delete re-checks managed-by on the object
+#   section_gitops_unreadable_live_state          gitops — unreadable live CRs leave that namespace's file untouched
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12777,6 +12778,64 @@ def section_direct_delete_paths() -> None:
            0 <= i_label < i_del, True)
 
 
+def section_gitops_unreadable_live_state() -> None:
+    """gitops mode: a namespace whose live CRs could not be read must not be
+    rendered without its baseline (cooldown, growOnly/shrinkOnly, change
+    cap). Its committed file is left untouched — not rewritten and not
+    pruned — for that sync."""
+    _section("gitops — unreadable live CRs leave that namespace's file untouched")
+
+    import subprocess as _sp
+    from src.config import CrWritebackConfig as _CRW
+    from src.git_provider import GitLabProvider as _GLP
+    from src.writeback_webhook import PruneScope, WebhookEntry, write_back_webhook_all
+
+    def _doc(ns, name, cpu):
+        return ("---\napiVersion: kube-resource-updater.io/v1\nkind: ResourceOverride\n"
+                f"metadata:\n  name: {name}\n  namespace: {ns}\n  labels:\n"
+                "    app.kubernetes.io/managed-by: kube-resource-updater\n"
+                f"spec:\n  selector:\n    matchLabels:\n      app: \"{name}\"\n"
+                f"  containers:\n    - name: app\n      requests:\n        cpu: {cpu}\n")
+    added, removed = [], []
+
+    def _run(cmd, allow_nonzero=False, timeout=None):
+        if cmd[:2] == ["git", "clone"]:
+            d = os.path.join(cmd[-1], "overrides")
+            os.makedirs(d, exist_ok=True)
+            for ns in ("ns-ok", "ns-bad", "ns-gone"):
+                with open(os.path.join(d, f"{ns}.resource-override.yaml"), "w") as fh:
+                    fh.write(_doc(ns, "api", "100m"))
+        if "add" in cmd:
+            added.extend(cmd[cmd.index("--") + 1:])
+        if "rm" in cmd:
+            removed.extend(cmd[cmd.index("--") + 1:])
+        return _sp.CompletedProcess(cmd, 1 if "--quiet" in cmd else 0, "", "")
+
+    def _e(ns):
+        return WebhookEntry(namespace=ns, cr_name="api", selector_labels={"app": "api"},
+                            containers=[{"name": "app", "requests": {"cpu": "900m"}}],
+                            create_mr=False)
+
+    with patch("src.writeback_webhook._run", side_effect=_run), \
+         patch("src.writeback_webhook._build_entries",
+               return_value=([_e("ns-ok"), _e("ns-bad")], [])):
+        write_back_webhook_all(
+            workloads_with_configs=[(None, None)],
+            cr_writeback=_CRW(repo_url="https://git.example/r.git", path="overrides"),
+            provider=_GLP(gitlab_url="https://git.example", token="t", username=""),
+            git_author_name="k", git_author_email="k@e",
+            prune_scope=PruneScope(unreadable_namespaces={"ns-bad"}),
+        )
+    _check("[gitops-unreadable] readable namespace still rewritten",
+           "overrides/ns-ok.resource-override.yaml" in added, True)
+    _check("[gitops-unreadable] unreadable namespace's file not rewritten",
+           "overrides/ns-bad.resource-override.yaml" in added, False)
+    _check("[gitops-unreadable] unreadable namespace's file not pruned",
+           "overrides/ns-bad.resource-override.yaml" in removed, False)
+    _check("[gitops-unreadable] genuine orphan file still pruned",
+           "overrides/ns-gone.resource-override.yaml" in removed, True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -13148,6 +13207,7 @@ def main() -> int:
     section_emit_cpu_limits_empty_limits()
     section_restart_query_retry()
     section_direct_delete_paths()
+    section_gitops_unreadable_live_state()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 
