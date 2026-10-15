@@ -128,7 +128,7 @@
             "labels": { "type": "string" },
             "squash": { "type": ["boolean", "string"] },
             "removeSourceBranch": { "type": ["boolean", "string"] },
-            "workBranch": { "type": "string" }
+            "workBranch": { "type": "string", "pattern": "^resource-updater/[A-Za-z0-9._/-]+$" }
           }
         }
       }

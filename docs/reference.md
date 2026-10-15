@@ -932,7 +932,7 @@ One install serves one cluster; per-namespace / per-workload tuning goes through
 | `writebackMode` | `WRITEBACK_MODE` | `gitops` | `gitops` commits CRs to git; `direct` server-side applies them to the cluster API (see [Write-back modes](#write-back-modes)) |
 | `direct.adoptForeignCRs` | `DIRECT_ADOPT_FOREIGN_CRS` | `false` | Direct mode: take over CRs whose `spec` another field manager owns; default skips them with an error |
 | `createMr` | `CREATE_MR` | `true` | `true` opens a GitLab MR; `false` pushes directly |
-| `mr.workBranch` | `MR_WORK_BRANCH` | `resource-updater/sync` | Source branch of the MR/PR; one per cluster when several share a repo. Must differ from `crWriteback.branch` |
+| `mr.workBranch` | `MR_WORK_BRANCH` | `resource-updater/sync` | Source branch of the MR/PR. Must start with `resource-updater/` (the tool force-pushes it); one per cluster when several share a repo, e.g. `resource-updater/<cluster>` |
 | `dryRun` | `DRY_RUN` | `false` | `true` skips all git operations |
 
 ### Prometheus

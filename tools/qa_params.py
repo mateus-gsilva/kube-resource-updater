@@ -12095,10 +12095,10 @@ def section_mr_work_branch() -> None:
 
     _check("[default] workBranch unchanged", MrConfig().work_branch, "resource-updater/sync")
     with _tf.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
-        fh.write("config:\n  mr:\n    workBranch: kru/cluster-a\n")
+        fh.write("config:\n  mr:\n    workBranch: resource-updater/cluster-a\n")
         path = fh.name
     _check("[config] workBranch read from the ConfigMap",
-           _Config.from_file(path).mr.work_branch, "kru/cluster-a")
+           _Config.from_file(path).mr.work_branch, "resource-updater/cluster-a")
     os.unlink(path)
 
     def _rejects(branch, target="main"):
@@ -12115,7 +12115,12 @@ def section_mr_work_branch() -> None:
     _check("[validate] option-looking workBranch rejected", _rejects("--upload-pack=x"), True)
     _check("[validate] workBranch equal to the target branch rejected (would force-push it)",
            _rejects("main"), True)
-    _check("[validate] sane workBranch accepted", _rejects("kru/cluster-a"), False)
+    _check("[validate] workBranch outside the resource-updater/ prefix rejected "
+           "(the tool force-pushes it — a human branch would be overwritten)",
+           _rejects("kru/cluster-a"), True)
+    _check("[validate] workBranch under resource-updater/ accepted",
+           _rejects("resource-updater/cluster-a"), False)
+    _check("[validate] bare prefix rejected", _rejects("resource-updater/"), True)
 
     seen: list = []
 
@@ -12133,12 +12138,23 @@ def section_mr_work_branch() -> None:
     with patch("src.writeback_webhook._run", side_effect=_run):
         _commit_repo(repo_url="https://git.example/r.git", branch="main", path="o",
                      entries=[e], provider=provider, git_author_name="k",
-                     git_author_email="k@e", mr_config=MrConfig(work_branch="kru/cluster-a"))
+                     git_author_email="k@e", mr_config=MrConfig(work_branch="resource-updater/cluster-a"))
     checkout = [c for c in seen if "checkout" in c]
     _check("[mr] work branch checked out from the configured name",
-           bool(checkout) and checkout[0][-2], "kru/cluster-a")
+           bool(checkout) and checkout[0][-2], "resource-updater/cluster-a")
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    if helm and os.path.isdir(_chart_dir()):
+        r = subprocess.run([helm, "template", "kru", _chart_dir(),
+                            "--set", "config.prometheusUrl=http://p:9090",
+                            "--set", "config.crWriteback.repoUrl=https://e/r.git",
+                            "--set", "config.crWriteback.path=o", "--set", "git.token=t",
+                            "--set", "config.mr.workBranch=feature/x"],
+                           capture_output=True, text=True)
+        _check("[chart] schema rejects a workBranch outside resource-updater/", r.returncode != 0, True)
     _check("[mr] MR opened from the configured branch",
-           provider.open_or_update_pr.call_args.kwargs.get("source_branch"), "kru/cluster-a")
+           provider.open_or_update_pr.call_args.kwargs.get("source_branch"), "resource-updater/cluster-a")
 
 
 def section_github_status_wording() -> None:

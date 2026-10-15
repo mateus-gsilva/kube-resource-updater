@@ -649,6 +649,12 @@ class Config:
                 f"config.mr.workBranch = {wb!r} is not a safe git ref (same rules as "
                 f"config.crWriteback.branch)."
             )
+        elif gitops and (not wb.startswith("resource-updater/") or wb == "resource-updater/"):
+            errors.append(
+                f"config.mr.workBranch = {wb!r} must start with 'resource-updater/' (e.g. "
+                f"'resource-updater/<cluster>') — the tool force-pushes this branch, so it "
+                f"must never be a branch a person works on."
+            )
         elif gitops and wb == (b or "main"):
             errors.append(
                 f"config.mr.workBranch = {wb!r} equals config.crWriteback.branch — the "

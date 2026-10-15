@@ -191,7 +191,7 @@ Opt-in is by Namespace annotation `kube-resource-updater.enabled: "true"`. Every
 | `config.mr.labels` | Comma-separated MR labels | `""` |
 | `config.mr.squash` | Set MR's `Squash commits when merging` flag | `false` |
 | `config.mr.removeSourceBranch` | Delete source branch after merge (kept true for the historical default) | `true` |
-| `config.mr.workBranch` | Source branch the tool force-pushes and opens the MR/PR from. Use one per cluster when several clusters share one gitops repo. Must differ from crWriteback.branch. | `resource-updater/sync` |
+| `config.mr.workBranch` | Source branch the tool force-pushes and opens the MR/PR from. Must start with `resource-updater/` (it is force-pushed); use one per cluster when several clusters share one gitops repo, e.g. `resource-updater/<cluster>`. | `resource-updater/sync` |
 
 ### Git credentials
 
