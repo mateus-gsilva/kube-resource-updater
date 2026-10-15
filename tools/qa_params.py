@@ -96,6 +96,7 @@ Run:
 #   section_health_gate                            Sample-quality gates — crash-loop health + data sufficiency
 #   section_grow_shrink_baseline_always_fetched   growOnly / shrinkOnly baseline — live CR state fetched unconditionally
 #   section_emit_cpu_limits                        emitCpuLimits — no limits.cpu in the CR when disabled
+#   section_max_change_cap                         maxChangePercent — per-sync change cap with OOM exemption
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -11151,6 +11152,157 @@ def section_emit_cpu_limits() -> None:
                    "@param config.emitCpuLimits " in fh.read(), True)
 
 
+def section_max_change_cap() -> None:
+    """`config.maxChangePercent` — bound how far one sync can move a value.
+
+    Baseline is what pods are admitted with today: the live CR, else the
+    workload's pod-template value, else nothing (no clamp). OOM-driven memory
+    increases are exempt on the way up (an OOMing pod cannot wait several
+    syncs) but still respect maxMemoryLimitMi.
+    """
+    _section("maxChangePercent — per-sync change cap with OOM exemption")
+
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock as _MM
+    from src.config import ResourceConfig as _RC
+    from src.workload import (
+        ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec,
+        list_workloads_in_namespace,
+    )
+    from src.writeback import ResourceBounds
+    from src.writeback_webhook import OomEvent, _apply_max_change, _build_containers_payload
+
+    P = "kube-resource-updater."
+    M = 1024 * 1024
+    _check("[default] maxChangePercent = 0 (disabled, current behaviour)",
+           _RC().max_change_percent, 0.0)
+    _check("[config] maxChangePercent parsed from the ConfigMap",
+           _RC.from_dict({"maxChangePercent": "25"}).max_change_percent, 25.0)
+    _check("[hier] workload annotation overrides maxChangePercent",
+           resolve_for_workload(_base_config(), {P + "maxChangePercent": "50"},
+                                {P + "maxChangePercent": "10"}).resource.max_change_percent,
+           10.0)
+    bad = _base_config()
+    bad.resource.max_change_percent = -5
+    try:
+        bad.validate()
+        rejected = False
+    except SystemExit:
+        rejected = True
+    _check("[validate] negative maxChangePercent rejected at startup", rejected, True)
+
+    nb = ResourceBounds()
+    base = {"requests": {"cpu": "100m", "memory": "1Gi"},
+            "limits": {"cpu": "400m", "memory": "2Gi"}}
+    up = {"requests": {"cpu": "300m", "memory": "3Gi"},
+          "limits": {"cpu": "1200m", "memory": "6Gi"}}
+    out = _apply_max_change(up, base, 50, exempt_memory_up=False, bounds=nb)
+    _check("[cap] cpu request +200% capped to +50%", out["requests"]["cpu"], "150m")
+    _check("[cap] memory request +200% capped to +50%", out["requests"]["memory"], "1536Mi")
+    _check("[cap] cpu limit capped to +50%", out["limits"]["cpu"], "600m")
+    _check("[cap] memory limit capped to +50%", out["limits"]["memory"], "3Gi")
+    down = {"requests": {"cpu": "10m", "memory": "100Mi"},
+            "limits": {"cpu": "40m", "memory": "200Mi"}}
+    out = _apply_max_change(down, base, 50, exempt_memory_up=False, bounds=nb)
+    _check("[cap] cpu request -90% capped to -50%", out["requests"]["cpu"], "50m")
+    _check("[cap] memory request capped to -50%", out["requests"]["memory"], "512Mi")
+    within = {"requests": {"cpu": "120m", "memory": "1Gi"},
+              "limits": {"cpu": "400m", "memory": "2Gi"}}
+    _check("[cap] change inside the cap is untouched",
+           _apply_max_change(within, base, 50, exempt_memory_up=False, bounds=nb), within)
+    out = _apply_max_change(up, base, 50, exempt_memory_up=True, bounds=nb)
+    _check("[cap-oom] OOM exemption lets memory limit grow past the cap",
+           out["limits"]["memory"], "6Gi")
+    _check("[cap-oom] OOM exemption lets memory request grow past the cap",
+           out["requests"]["memory"], "3Gi")
+    _check("[cap-oom] OOM exemption does not apply to CPU", out["requests"]["cpu"], "150m")
+    out = _apply_max_change(down, base, 50, exempt_memory_up=True, bounds=nb)
+    _check("[cap-oom] OOM exemption only covers increases (memory decrease still capped)",
+           out["requests"]["memory"], "512Mi")
+    out = _apply_max_change(up, {"requests": {"cpu": "100m"}}, 50,
+                            exempt_memory_up=False, bounds=nb)
+    _check("[cap] field without a baseline value is not clamped",
+           out["requests"]["memory"], "3Gi")
+    capped_b = ResourceBounds(max_cpu_request_m=120)
+    out = _apply_max_change({"requests": {"cpu": "50m"}}, {"requests": {"cpu": "1000m"}},
+                            10, exempt_memory_up=False, bounds=capped_b)
+    _check("[cap] max bound still wins over the cap's floor (hard invariant)",
+           out["requests"]["cpu"], "120m")
+
+    # ── Through the payload builder: baseline selection ─────────────────
+    prom = SimpleNamespace(cpu_request_m=1000, memory_request_bytes=512 * M,
+                           cpu_limit_m=2000, memory_limit_bytes=1024 * M)
+    cfg = _base_config()
+    cfg.prometheus_url = "http://prom:9090"
+    cfg.resource.max_change_percent = 20
+
+    def _build(container, state=None, events=None):
+        rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                    containers=[container])
+        with _no_health_gate(), patch("src.writeback_webhook._query_prom_values",
+                                      return_value=prom):
+            payload, _a, _h = _build_containers_payload(
+                rec, cfg, oom_state=state, oom_events=events or {},
+                oom_eligible=True, health_gate_enabled=False,
+            )
+        return payload[0] if payload else {}
+
+    live = {"containers": {"app": {"requests": {"cpu": "500m", "memory": "512Mi"},
+                                   "limits": {"cpu": "1000m", "memory": "1Gi"}}}}
+    out = _build(_CRec(container_name="app"), state=live)
+    _check("[baseline] live CR is the baseline (500m +20% = 600m)",
+           out["requests"]["cpu"], "600m")
+    tmpl = _CRec(container_name="app",
+                 template_resources={"requests": {"cpu": "250m"}, "limits": {"cpu": "500m"}})
+    out = _build(tmpl)
+    _check("[baseline] no CR yet → pod-template value is the baseline (250m +20% = 300m)",
+           out["requests"]["cpu"], "300m")
+    out = _build(_CRec(container_name="app"))
+    _check("[baseline] neither CR nor template value → no clamp",
+           out["requests"]["cpu"], "1000m")
+
+    # OOM-driven growth: trap 1Gi × 2.0 = 2Gi, far past +20% of the 1Gi baseline.
+    cfg.resource.oom_bump_factor = 2.0
+    ev = OomEvent(namespace="ns", workload_name="api", container="app",
+                  finished_at="2026-10-15T00:00:00Z", trap_limit_bytes=1024 * M)
+    out = _build(_CRec(container_name="app"), state=live, events={"app": ev})
+    _check("[oom] fresh OOM bump is exempt from the cap on the way up",
+           out["limits"]["memory"], "2Gi")
+    _check("[oom] CPU is still capped in the same sync", out["requests"]["cpu"], "600m")
+    cfg.resource.max_memory_limit_mi = 1536
+    out = _build(_CRec(container_name="app"), state=live, events={"app": ev})
+    _check("[oom] exempt OOM growth still respects maxMemoryLimitMi",
+           out["limits"]["memory"], "1536Mi")
+
+    cfg.resource.max_memory_limit_mi = 0
+    floored = {"floor": {"app": 2048 * M}, "containers": live["containers"]}
+    out = _build(_CRec(container_name="app"), state=floored)
+    _check("[oom] sticky OOM floor is exempt too (capping below it re-creates the OOM)",
+           out["limits"]["memory"], "2Gi")
+
+    # ── Discovery captures the pod-template resources ───────────────────
+    c = _MM()
+    c.name = "app"
+    c.resources.requests = {"cpu": "250m", "memory": "128Mi"}
+    c.resources.limits = {"memory": "256Mi"}
+    item = _MM()
+    item.metadata.name = "api"
+    item.metadata.labels = {}
+    item.metadata.annotations = {}
+    item.spec.paused = False
+    item.spec.template.spec.containers = [c]
+    item.spec.template.spec.init_containers = []
+    item.spec.template.metadata.labels = {"app": "api"}
+    apps = _MM()
+    apps.list_namespaced_deployment.return_value = _MM(items=[item])
+    apps.list_namespaced_stateful_set.return_value = _MM(items=[])
+    apps.list_namespaced_daemon_set.return_value = _MM(items=[])
+    recs = list_workloads_in_namespace(apps, "ns", batch_api=_MM())
+    tr = recs[0].containers[0].template_resources if recs else None
+    _check("[discovery] pod-template requests/limits captured per container",
+           tr, {"requests": {"cpu": "250m", "memory": "128Mi"}, "limits": {"memory": "256Mi"}})
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -11505,6 +11657,7 @@ def main() -> int:
     section_health_gate()
     section_grow_shrink_baseline_always_fetched()
     section_emit_cpu_limits()
+    section_max_change_cap()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

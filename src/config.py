@@ -151,6 +151,10 @@ class ResourceConfig:
     # pods end up with no CPU limit at all — CPU is then bounded by requests
     # (CFS shares) instead of a hard quota that throttles bursts.
     emit_cpu_limits: bool = True
+    # Largest move one sync may make on any request/limit, in percent of the
+    # current baseline (live CR value; else the pod-template value; else no
+    # clamp). 0 disables. OOM-driven memory increases are exempt upward.
+    max_change_percent: float = 0.0
 
     @property
     def effective_cpu_request_margin(self) -> float:
@@ -221,6 +225,7 @@ class ResourceConfig:
                 d.get("maxRestartsInWindow", 3), default=3, field="maxRestartsInWindow"),
             min_sample_coverage=float(d.get("minSampleCoverage", "0.25")),
             emit_cpu_limits=_bool(d.get("emitCpuLimits", True), default=True),
+            max_change_percent=float(d.get("maxChangePercent", 0) or 0),
         )
 
     @classmethod
@@ -257,6 +262,7 @@ class ResourceConfig:
             max_restarts_in_window=int(os.environ.get("MAX_RESTARTS_IN_WINDOW", "3")),
             min_sample_coverage=float(os.environ.get("MIN_SAMPLE_COVERAGE", "0.25")),
             emit_cpu_limits=os.environ.get("EMIT_CPU_LIMITS", "true").lower() in ("1", "true", "yes"),
+            max_change_percent=float(os.environ.get("MAX_CHANGE_PERCENT", "0") or 0),
         )
 
 
@@ -433,6 +439,12 @@ class Config:
                     f"{label} = {val} is out of expected range [{low}, {high}] — "
                     f"common cause: typo (e.g. 95 instead of 0.95 for a percentile)"
                 )
+
+        if rc.max_change_percent < 0:
+            errors.append(
+                f"config.maxChangePercent = {rc.max_change_percent} is negative — "
+                f"use 0 to disable the per-sync change cap"
+            )
 
         # Per-type margins (optional fields; None = inherit marginFraction).
         for attr, label in [

@@ -32,6 +32,10 @@ class ContainerRecommendation:
     lower_bound: ResourceRequest = field(default_factory=ResourceRequest)
     upper_bound: ResourceRequest = field(default_factory=ResourceRequest)
     uncapped_target: ResourceRequest = field(default_factory=ResourceRequest)
+    # `{"requests": {...}, "limits": {...}}` from the workload's PodTemplate,
+    # captured at discovery. Baseline for the per-sync change cap when no
+    # ResourceOverride exists yet.
+    template_resources: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -64,6 +68,19 @@ class WorkloadRecommendation:
     @property
     def has_recommendation(self) -> bool:
         return len(self.containers) > 0
+
+
+def _template_resources(container) -> dict:
+    """`{"requests": {...}, "limits": {...}}` of a PodTemplate container (str values)."""
+    res = getattr(container, "resources", None)
+    out: dict = {}
+    for section in ("requests", "limits"):
+        vals = getattr(res, section, None) if res is not None else None
+        if isinstance(vals, dict) and vals:
+            out[section] = {str(k): str(v) for k, v in vals.items() if k in ("cpu", "memory")}
+            if not out[section]:
+                out.pop(section)
+    return out
 
 
 def _tmpl_spec_template(item):
@@ -160,7 +177,10 @@ def list_workloads_in_namespace(
                 tmpl = tmpl_accessor(item)
                 tmpl_spec = tmpl.spec if tmpl else None
                 containers = [
-                    ContainerRecommendation(container_name=c.name)
+                    ContainerRecommendation(
+                        container_name=c.name,
+                        template_resources=_template_resources(c),
+                    )
                     for c in (tmpl_spec.containers if tmpl_spec else []) or []
                 ]
                 if not containers:

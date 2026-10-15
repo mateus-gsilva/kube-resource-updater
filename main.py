@@ -157,6 +157,7 @@ def _log_effective_overrides(rec: WorkloadRecommendation, eff: Config, base: Con
         ("createMr",         eff.create_mr,               base.create_mr,              str),
         ("dryRun",           eff.dry_run,                 base.dry_run,                str),
         ("emitCpuLimits",    rc.emit_cpu_limits,          brc.emit_cpu_limits,         str),
+        ("maxChangePct",     rc.max_change_percent,       brc.max_change_percent,      lambda v: f"{v:g}%"),
     ]:
         if val != dval:
             parts.append(f"{name}={fmt(val)}")

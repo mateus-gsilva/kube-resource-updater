@@ -1174,6 +1174,31 @@ def _build_containers_payload(
                 rec, c.container_name, res_pre_clamp, res, cfg.grow_only, cfg.shrink_only,
             )
 
+        # ── (4b) Per-sync change cap vs the current baseline ──────────────
+        # Baseline = live CR (what pods are admitted with), else the pod
+        # template, else nothing to compare against. OOM-driven memory growth
+        # (fresh bump or sticky floor) is exempt on the way up: an OOMing pod
+        # cannot wait several syncs.
+        if rc.max_change_percent > 0:
+            cap_baseline = old_res or (getattr(c, "template_resources", None) or None)
+            if cap_baseline:
+                res_pre_cap = res
+                res = _apply_max_change(
+                    res, cap_baseline, rc.max_change_percent,
+                    # A sticky OOM floor is the same signal one sync later —
+                    # capping below it would re-create the OOM.
+                    exempt_memory_up=oom_bump_attempted or bool(
+                        oom_floor_enabled and prior_floor.get(c.container_name)),
+                    bounds=bounds,
+                )
+                if res != res_pre_cap:
+                    _log.info(
+                        "  [max-change] %s/%s/%s: change capped at %g%% of the current "
+                        "values (%s → %s)",
+                        rec.namespace, rec.target_name, c.container_name,
+                        rc.max_change_percent, _res_brief(res_pre_cap), _res_brief(res),
+                    )
+
         # ── (5) Final floors/ceilings pass ─────────────────────────────────
         # Hard invariants always win. If grow/shrink kept a value below the
         # floor or above the ceiling, this clamps it back into bounds.
@@ -1429,6 +1454,82 @@ def _normalize_rfc3339(value) -> str | None:
         return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     s = str(value).strip()
     return s or None
+
+
+def _res_brief(res: dict) -> str:
+    """Compact `req=cpu/mem lim=cpu/mem` rendering for log lines."""
+    r = res.get("requests") or {}
+    lim = res.get("limits") or {}
+    return (f"req={r.get('cpu', '—')}/{r.get('memory', '—')} "
+            f"lim={lim.get('cpu', '—')}/{lim.get('memory', '—')}")
+
+
+_MIB = 1 << 20
+
+# (section, key) → hard maximum attribute on ResourceBounds (0 = unset).
+_MAX_BOUND_ATTR = {
+    ("requests", "cpu"): "max_cpu_request_m",
+    ("requests", "memory"): "max_memory_request_mi",
+    ("limits", "cpu"): "max_cpu_limit_m",
+    ("limits", "memory"): "max_memory_limit_mi",
+}
+
+
+def _apply_max_change(
+    res: dict,
+    baseline: dict,
+    percent: float,
+    *,
+    exempt_memory_up: bool,
+    bounds: ResourceBounds,
+) -> dict:
+    """Clamp every request/limit to within ±`percent` of its baseline value.
+
+    Fields without a baseline value (or a zero baseline) are left alone. With
+    `exempt_memory_up`, memory may grow past the cap (OOM-driven growth) but
+    a memory decrease is still capped. The configured max bounds are hard
+    invariants and win over the cap's lower edge; `limits >= requests` is
+    restored afterwards.
+    """
+    if percent <= 0 or not baseline:
+        return res
+    frac = percent / 100.0
+    out: dict = {}
+    for section in ("requests", "limits"):
+        new_s = dict(res.get(section) or {})
+        old_s = baseline.get(section) or {}
+        for key in ("cpu", "memory"):
+            new_v, old_v = new_s.get(key), old_s.get(key)
+            if not new_v or not old_v:
+                continue
+            is_cpu = key == "cpu"
+            unit = 1 if is_cpu else _MIB
+            new_n = (_parse_cpu_m(new_v) if is_cpu else _parse_memory_bytes(new_v)) / unit
+            old_n = (_parse_cpu_m(old_v) if is_cpu else _parse_memory_bytes(old_v)) / unit
+            if old_n <= 0:
+                continue
+            upper = int(old_n * (1 + frac))          # floor: stay inside the cap
+            lower = -int(-(old_n * (1 - frac)) // 1)  # ceil
+            capped = new_n
+            if new_n > upper and not (exempt_memory_up and not is_cpu):
+                capped = upper
+            elif new_n < lower:
+                capped = max(lower, 0)
+            if capped == new_n:
+                continue
+            max_v = getattr(bounds, _MAX_BOUND_ATTR[(section, key)], 0)
+            if max_v:
+                capped = min(capped, max_v)
+            capped = int(capped)
+            new_s[key] = f"{capped}m" if is_cpu else _fmt_memory(str(capped * _MIB))
+        if new_s:
+            out[section] = new_s
+    for key, parse in (("cpu", _parse_cpu_m), ("memory", _parse_memory_bytes)):
+        req = (out.get("requests") or {}).get(key)
+        lim = (out.get("limits") or {}).get(key)
+        if req and lim and parse(lim) < parse(req):
+            out["limits"][key] = req
+    return out
 
 
 def _drop_cpu_limit(res: dict) -> dict:
