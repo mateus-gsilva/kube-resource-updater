@@ -309,6 +309,7 @@ Opt-in is by Namespace annotation `kube-resource-updater.enabled: "true"`. Every
 | `webhook.autoRollout.debounceSeconds` | How long to wait after the last CR change before patching the workload's PodTemplate. | `30` |
 | `webhook.autoRollout.maxConcurrent` | Max workload rollouts in progress at once (0 = unlimited) | `1` |
 | `webhook.autoRollout.minIntervalSeconds` | Minimum seconds between two restarts (0 = no spacing) | `0` |
+| `webhook.autoRollout.rolloutTimeoutSeconds` | Seconds a restarted workload counts against maxConcurrent before its slot is released (also released after 3 consecutive status read errors) | `600` |
 | `webhook.status.enabled` | Write CR.status.appliedToPodCount + lastAppliedAt; controls the RBAC verb on resourceoverrides/status too. | `false` |
 | `webhook.status.flushIntervalSeconds` | Coalesce window for the status writer (seconds). | `30` |
 | `webhook.metrics.serviceMonitor.enabled` | Create a ServiceMonitor for /metrics | `false` |

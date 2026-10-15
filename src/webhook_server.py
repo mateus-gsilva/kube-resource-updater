@@ -317,6 +317,7 @@ def run(
     auto_rollout_debounce_seconds: int = 30,
     auto_rollout_max_concurrent: int = 1,
     auto_rollout_min_interval_seconds: int = 0,
+    auto_rollout_timeout_seconds: int = 600,
 ) -> None:
     """Start the webhook server. Blocks until SIGTERM/SIGINT.
 
@@ -362,6 +363,7 @@ def run(
             debounce_seconds=auto_rollout_debounce_seconds,
             max_concurrent=auto_rollout_max_concurrent,
             min_interval_seconds=auto_rollout_min_interval_seconds,
+            rollout_timeout_seconds=auto_rollout_timeout_seconds,
         )
         rollout_trigger.start()
         cr_event_callback = rollout_trigger.handle_event

@@ -757,13 +757,15 @@ webhook:
     debounceSeconds: 30
     ## Rate limit so one sync that changes many CRs does not restart every
     ## workload at once. A restart counts as in progress until its controller
-    ## reports the rollout complete (or 10 minutes pass); due restarts beyond
+    ## reports the rollout complete (or rolloutTimeoutSeconds pass); due restarts beyond
     ## the limit queue in order. Watch replays and webhook reconnects never
     ## trigger restarts on their own — only a real change of a CR's resources.
     ## @param webhook.autoRollout.maxConcurrent Max workload rollouts in progress at once (0 = unlimited)
     maxConcurrent: 1
     ## @param webhook.autoRollout.minIntervalSeconds Minimum seconds between two restarts (0 = no spacing)
     minIntervalSeconds: 0
+    ## @param webhook.autoRollout.rolloutTimeoutSeconds Seconds a restarted workload counts against maxConcurrent before its slot is released even if the rollout has not finished (a slot is also released after 3 consecutive status read errors)
+    rolloutTimeoutSeconds: 600
 
   ## Status writer — populates ResourceOverride.status.appliedToPodCount and
   ## .status.lastAppliedAt so `kubectl get ro -A` becomes a real adoption

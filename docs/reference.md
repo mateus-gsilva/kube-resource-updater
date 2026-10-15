@@ -219,7 +219,7 @@ After merge, ArgoCD/Flux applies the CR to the cluster. Two things happen next:
 
 For workloads without autoRollout, the new resources take effect on the next natural rollout (chart upgrade, image change, manual `kubectl rollout restart`).
 
-Restarts fire only when a CR's resources differ from the last state the webhook knew — watch replays and webhook reconnects (whose initial list seeds that state) never restart anything by themselves. They are also rate-limited: `webhook.autoRollout.maxConcurrent` (default `1`; `0` = unlimited) bounds workload rollouts in progress at once — a restart counts until its controller reports the rollout complete, or 10 minutes pass — and `webhook.autoRollout.minIntervalSeconds` (default `0`) spaces consecutive restarts. Due restarts beyond that queue in order, so a sync that changes 50 CRs rolls the workloads one after another. Debounce (`debounceSeconds`) and cancellation on CR deletion are unchanged.
+Restarts fire only when a CR's resources differ from the last state the webhook knew — watch replays and webhook reconnects (whose initial list seeds that state) never restart anything by themselves. They are also rate-limited: `webhook.autoRollout.maxConcurrent` (default `1`; `0` = unlimited) bounds workload rollouts in progress at once — a restart counts until its controller reports the rollout complete, `webhook.autoRollout.rolloutTimeoutSeconds` (default `600`) pass, or three status reads in a row fail — and `webhook.autoRollout.minIntervalSeconds` (default `0`) spaces consecutive restarts. Due restarts beyond that queue in order, so a sync that changes 50 CRs rolls the workloads one after another. Debounce (`debounceSeconds`) and cancellation on CR deletion are unchanged.
 
 ---
 

@@ -272,7 +272,8 @@
             "enabled": { "type": "boolean" },
             "debounceSeconds": { "type": ["integer", "string"] },
             "maxConcurrent": { "type": ["integer", "string"] },
-            "minIntervalSeconds": { "type": ["integer", "string"] }
+            "minIntervalSeconds": { "type": ["integer", "string"] },
+            "rolloutTimeoutSeconds": { "type": ["integer", "string"] }
           }
         },
         "status": {

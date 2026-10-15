@@ -12913,6 +12913,7 @@ def main() -> int:
     section_direct_prune_partial_failure()
     section_direct_live_state_failure()
     section_rollout_tick_resilience()
+    section_rollout_slot_release()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

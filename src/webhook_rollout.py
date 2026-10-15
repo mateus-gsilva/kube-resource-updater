@@ -28,7 +28,7 @@ webhook knew for it. The CR cache seeds that state from every (re)list, so
 watch replays and reconnects do not restart anything on their own. Due
 restarts are rate-limited: at most `max_concurrent` workload rollouts in
 progress at once (a rollout counts until its controller reports it complete,
-or `rollout_timeout_seconds`), and at least `min_interval_seconds` between
+or `rollout_timeout_seconds`, or three status reads in a row fail), and at least `min_interval_seconds` between
 two restarts. The rest stay queued — a sync that changes 50 CRs rolls the
 workloads one after another, not all together.
 
@@ -79,6 +79,11 @@ class _PendingRestart:
 _PATCH_MAX_ATTEMPTS = 3
 _PATCH_BACKOFF_BASE_S = 30
 
+# A rollout whose status cannot be read this many ticks in a row stops
+# counting against maxConcurrent — the queue must not stall on a workload the
+# webhook can no longer observe.
+_READ_ERRORS_BEFORE_RELEASE = 3
+
 
 class RolloutTrigger:
     """Watches CR ADD/MODIFY events and restarts the matching workloads.
@@ -113,6 +118,9 @@ class RolloutTrigger:
         self._rollout_timeout = datetime.timedelta(seconds=max(1, int(rollout_timeout_seconds)))
         # Workloads restarted whose rollout has not completed yet → PATCH time.
         self._in_flight: dict[tuple[str, str, str], datetime.datetime] = {}
+        # Consecutive rollout-status read errors per in-flight workload; the
+        # slot is released after `_READ_ERRORS_BEFORE_RELEASE` in a row.
+        self._read_errors: dict[tuple[str, str, str], int] = {}
         self._last_fire_at: datetime.datetime | None = None
         # Last-known resources per CR `(namespace, name)` — the baseline that
         # decides whether an event is a real change or a replay.
@@ -384,18 +392,31 @@ class RolloutTrigger:
                 _log.warning("[rollout] %s/%s %s did not finish rolling out within %ss — "
                              "no longer counted against maxConcurrent",
                              key[0], key[1], key[2], int(self._rollout_timeout.total_seconds()))
-                del self._in_flight[key]
+                self._release(key)
                 continue
             try:
                 done = self._rollout_complete(*key)
-            except ApiException as exc:
-                done = getattr(exc, "status", None) == 404
-            except Exception as exc:  # noqa: BLE001 — connection errors, odd shapes
-                _log.warning("[rollout] could not read rollout status of %s/%s %s: %s",
-                             key[0], key[1], key[2], exc)
-                done = False
+                self._read_errors.pop(key, None)
+            except Exception as exc:  # noqa: BLE001 — ApiException, connection errors, odd shapes
+                if getattr(exc, "status", None) == 404:
+                    done = True
+                else:
+                    n = self._read_errors.get(key, 0) + 1
+                    self._read_errors[key] = n
+                    _log.warning("[rollout] could not read rollout status of %s/%s %s "
+                                 "(%d/%d): %s", key[0], key[1], key[2], n,
+                                 _READ_ERRORS_BEFORE_RELEASE, exc)
+                    done = n >= _READ_ERRORS_BEFORE_RELEASE
+                    if done:
+                        _log.warning("[rollout] releasing the maxConcurrent slot of %s/%s %s "
+                                     "after %d consecutive status read errors",
+                                     key[0], key[1], key[2], n)
             if done:
-                del self._in_flight[key]
+                self._release(key)
+
+    def _release(self, key: tuple[str, str, str]) -> None:
+        self._in_flight.pop(key, None)
+        self._read_errors.pop(key, None)
 
     def _rollout_complete(self, namespace: str, kind: str, name: str) -> bool:
         """True when the workload's controller reports the rollout finished."""

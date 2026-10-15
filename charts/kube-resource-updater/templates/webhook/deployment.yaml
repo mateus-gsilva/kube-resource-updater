@@ -151,6 +151,8 @@ spec:
               value: {{ .Values.webhook.autoRollout.maxConcurrent | default 0 | quote }}
             - name: WEBHOOK_AUTO_ROLLOUT_MIN_INTERVAL_SECONDS
               value: {{ .Values.webhook.autoRollout.minIntervalSeconds | default 0 | quote }}
+            - name: WEBHOOK_AUTO_ROLLOUT_TIMEOUT_SECONDS
+              value: {{ .Values.webhook.autoRollout.rolloutTimeoutSeconds | default 600 | quote }}
             {{- end }}
             # Validating webhook config name so the cert reconciler can
             # patch the VWC's caBundle on first start + on drift. Empty
