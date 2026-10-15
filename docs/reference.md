@@ -798,7 +798,9 @@ A direct push rejected because the branch moved on since the clone (another writ
 
   Audit trail: every change stamps `kube-resource-updater.io/last-changed` (RFC3339) and `kube-resource-updater.io/previous-resources` (compact JSON `{container: {requests, limits}}` of the prior values) on the CR, and records a `ResourcesUpdated` Event (`kubectl get events --field-selector involvedObject.kind=ResourceOverride`) whose message lists `old→new` per field. The same two annotations are rendered into gitops-mode CRs too (refreshed only when the resources change, so no-op syncs stay byte-identical).
 
-  ArgoCD tracking metadata is removed from live CRs in direct mode: every `argocd.argoproj.io/*` annotation, plus `app.kubernetes.io/instance` **only** when its `managedFields` owner is an `argocd*` manager (Argo CD label tracking) — the same label set by Helm, kustomize or a person is left alone. In gitops mode only a committed `argocd.argoproj.io/tracking-id` is dropped; operator-set Argo CD options in git are kept. The CR path must not stay under an Argo CD Application in direct mode.
+  Foreign ownership: if any field manager other than `kube-resource-updater` owns something under `spec` (the CR is still in an Argo CD Application, or was hand-applied), the CR is skipped — no apply, no orphan delete — with an `[direct] … spec is owned by …` error. Set `config.direct.adoptForeignCRs: true` for one deliberate migration sync: the forced apply (plus the `spec.containers` replace) moves ownership to the tool, after which the flag can go back to `false`.
+
+  ArgoCD tracking metadata is removed from live CRs in direct mode: the `argocd.argoproj.io/tracking-id` annotation, plus `app.kubernetes.io/instance` **only** when its `managedFields` owner is an `argocd*` manager (Argo CD label tracking) — the same label set by Helm, kustomize or a person is left alone, as are operator-set Argo CD options such as `sync-options` / `compare-options`. In gitops mode only a committed `argocd.argoproj.io/tracking-id` is dropped; operator-set Argo CD options in git are kept. The CR path must not stay under an Argo CD Application in direct mode.
 
   No `crWriteback`, git token or author identity is required or validated. RBAC: the chart adds `create`/`patch`/`delete` on `resourceoverrides` and `create`/`patch` on `events` to the sync ClusterRole only in this mode. `dryRun` logs every would-be apply and delete without writing.
 
@@ -928,6 +930,7 @@ One install serves one cluster; per-namespace / per-workload tuning goes through
 | `gitAuthorName` | `GIT_AUTHOR_NAME` | `kube-resource-updater` | Git commit author name |
 | `gitAuthorEmail` | `GIT_AUTHOR_EMAIL` | `kube-resource-updater@cluster.local` | Git commit author email |
 | `writebackMode` | `WRITEBACK_MODE` | `gitops` | `gitops` commits CRs to git; `direct` server-side applies them to the cluster API (see [Write-back modes](#write-back-modes)) |
+| `direct.adoptForeignCRs` | `DIRECT_ADOPT_FOREIGN_CRS` | `false` | Direct mode: take over CRs whose `spec` another field manager owns; default skips them with an error |
 | `createMr` | `CREATE_MR` | `true` | `true` opens a GitLab MR; `false` pushes directly |
 | `mr.workBranch` | `MR_WORK_BRANCH` | `resource-updater/sync` | Source branch of the MR/PR; one per cluster when several share a repo. Must differ from `crWriteback.branch` |
 | `dryRun` | `DRY_RUN` | `false` | `true` skips all git operations |

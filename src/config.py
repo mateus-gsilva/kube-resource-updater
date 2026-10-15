@@ -357,6 +357,10 @@ class Config:
     # applies them to the cluster API and records the audit trail on the CR
     # (annotations + Kubernetes Events) instead of in git history.
     writeback_mode: str = "gitops"
+    # Direct mode only: take over CRs whose `spec` another field manager owns
+    # (e.g. still applied by Argo CD). Off by default — such CRs are skipped
+    # with an error; turn on for one deliberate migration sync.
+    direct_adopt_foreign_crs: bool = False
 
     @property
     def is_direct(self) -> bool:
@@ -796,6 +800,7 @@ class Config:
             git_installation_id=os.environ.get("GITHUB_APP_INSTALLATION_ID", "").strip(),
             git_app_private_key=os.environ.get("GITHUB_APP_PRIVATE_KEY", ""),
             writeback_mode=str(cfg.get("writebackMode", "gitops") or "gitops").strip().lower(),
+            direct_adopt_foreign_crs=_bool((cfg.get("direct") or {}).get("adoptForeignCRs", False)),
         )
 
     @classmethod
@@ -865,6 +870,7 @@ class Config:
             git_installation_id=os.environ.get("GITHUB_APP_INSTALLATION_ID", "").strip(),
             git_app_private_key=os.environ.get("GITHUB_APP_PRIVATE_KEY", ""),
             writeback_mode=(os.environ.get("WRITEBACK_MODE", "gitops") or "gitops").strip().lower(),
+            direct_adopt_foreign_crs=os.environ.get("DIRECT_ADOPT_FOREIGN_CRS", "false").lower() in ("1", "true", "yes"),
         )
 
     @classmethod

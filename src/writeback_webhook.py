@@ -80,7 +80,6 @@ MANAGED_BY_VALUE = "kube-resource-updater"
 FIELD_MANAGER = "kube-resource-updater"
 
 # ArgoCD tracking metadata. See `_argocd_tracking_metadata` for the strip rule.
-ARGOCD_ANNOTATION_PREFIX = "argocd.argoproj.io/"
 ARGOCD_TRACKING_ID_ANNOTATION = "argocd.argoproj.io/tracking-id"
 ARGOCD_INSTANCE_LABEL = "app.kubernetes.io/instance"
 
@@ -259,6 +258,7 @@ def write_back_webhook_all(
     custom_objects_api=None,
     core_v1_api=None,
     prune_scope: PruneScope | None = None,
+    adopt_foreign_crs: bool = False,
 ) -> list[tuple[str, list[str]]] | None:
     """Generate ResourceOverride CR files and commit them to the configured central repo.
 
@@ -336,6 +336,7 @@ def write_back_webhook_all(
             custom_objects_api=custom_objects_api,
             core_v1_api=core_v1_api,
             prune_scope=scope,
+            adopt_foreign=adopt_foreign_crs,
         )
 
     dry_entries = [e for e in entries if e.dry_run or dry_run]
@@ -2098,10 +2099,9 @@ def _argocd_tracking_metadata(live: dict) -> tuple[list[str], list[str]]:
     """Return `(annotation_keys, label_keys)` of ArgoCD tracking metadata on a
     live CR that direct write-back must remove.
 
-    Rule:
-      - every `argocd.argoproj.io/*` annotation — ArgoCD's tracking-id and
-        per-resource options only mean something on an object an
-        Application manages, which a directly-applied CR must not be;
+    Rule (tracking metadata only — operator-set Argo CD options such as
+    `sync-options` / `compare-options` are left alone):
+      - the `argocd.argoproj.io/tracking-id` annotation (annotation tracking);
       - the `app.kubernetes.io/instance` label ONLY when a field manager
         whose name starts with `argocd` owns it (ArgoCD label tracking).
         The same label set by Helm, kustomize or a person is left alone —
@@ -2112,7 +2112,7 @@ def _argocd_tracking_metadata(live: dict) -> tuple[list[str], list[str]]:
     deletes it on the next sync.
     """
     anns = [k for k in sorted(live.get("annotations") or {})
-            if k.startswith(ARGOCD_ANNOTATION_PREFIX)]
+            if k == ARGOCD_TRACKING_ID_ANNOTATION]
     labels: list[str] = []
     if ARGOCD_INSTANCE_LABEL in (live.get("labels") or {}):
         for mf in live.get("managed_fields") or []:
@@ -2124,6 +2124,18 @@ def _argocd_tracking_metadata(live: dict) -> tuple[list[str], list[str]]:
                 labels.append(ARGOCD_INSTANCE_LABEL)
                 break
     return anns, labels
+
+
+def _foreign_spec_managers(managed_fields) -> list[str]:
+    """Field managers other than the tool that own anything under `spec`."""
+    out = []
+    for mf in managed_fields or []:
+        manager = str(mf.get("manager", ""))
+        if manager == FIELD_MANAGER:
+            continue
+        if "f:spec" in (mf.get("fieldsV1") or {}):
+            out.append(manager)
+    return sorted(set(out))
 
 
 def _direct_apply_body(e: WebhookEntry, live: dict | None) -> dict:
@@ -2265,8 +2277,13 @@ def _apply_direct(
     custom_objects_api,
     core_v1_api,
     prune_scope: PruneScope | None = None,
+    adopt_foreign: bool = False,
 ) -> list[tuple[str, list[str]]] | None:
     """Server-side apply every entry and delete tool-owned CRs no longer wanted.
+
+    A CR whose `spec` another field manager owns (still under an Argo CD
+    Application, hand-applied) is skipped for apply and deletion with an
+    error unless `adopt_foreign` — a forced apply would silently take it over.
 
     Orphan scope mirrors gitops pruning: a CR labelled
     `app.kubernetes.io/managed-by=kube-resource-updater` that no entry of this
@@ -2289,6 +2306,15 @@ def _apply_direct(
         if e.namespace in unreadable:
             continue
         live = state_lookup.get((e.namespace, e.cr_name))
+        foreign = _foreign_spec_managers((live or {}).get("managed_fields"))
+        if foreign and not adopt_foreign:
+            failed += 1
+            _log.error(
+                "[direct] ResourceOverride %s/%s: spec is owned by %s, not by %s — skipped. "
+                "Remove it from the Application / tool that manages it, or set "
+                "config.direct.adoptForeignCRs=true for one migration sync to take it over.",
+                e.namespace, e.cr_name, ", ".join(foreign), FIELD_MANAGER)
+            continue
         body = _direct_apply_body(e, live)
         if _direct_unchanged(body, live):
             unchanged += 1
@@ -2341,7 +2367,7 @@ def _apply_direct(
 
     deleted = _prune_orphan_crs(entries, global_dry_run=global_dry_run,
                                 custom_objects_api=custom_objects_api,
-                                prune_scope=prune_scope)
+                                prune_scope=prune_scope, adopt_foreign=adopt_foreign)
     _log.info("[direct] %d applied, %d unchanged, %d failed, %d orphan(s) deleted",
               len(applied), unchanged, failed, len(deleted))
     if not applied and not deleted:
@@ -2356,6 +2382,7 @@ def _prune_orphan_crs(
     global_dry_run: bool,
     custom_objects_api,
     prune_scope: PruneScope | None = None,
+    adopt_foreign: bool = False,
 ) -> list[tuple[str, str]]:
     """Delete tool-labelled CRs whose workload is gone.
 
@@ -2393,6 +2420,11 @@ def _prune_orphan_crs(
             continue
         if (meta.get("labels") or {}).get(MANAGED_BY_LABEL) != MANAGED_BY_VALUE:
             continue  # defence in depth against a selector-ignoring API
+        foreign = _foreign_spec_managers(meta.get("managedFields"))
+        if foreign and not adopt_foreign:
+            _log.error("[direct] not deleting orphan ResourceOverride %s/%s: its spec is "
+                       "owned by %s", ns, name, ", ".join(foreign))
+            continue
         if global_dry_run:
             _log.info("[DRY RUN] would delete orphan ResourceOverride %s/%s", ns, name)
             continue

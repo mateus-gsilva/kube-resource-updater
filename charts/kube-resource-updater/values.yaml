@@ -125,6 +125,10 @@ config:
   ##
   ## @param config.writebackMode Write-back mode: "gitops" (commit to git) | "direct" (apply to the cluster API)
   writebackMode: gitops
+  ## Direct-mode options (ignored in gitops mode).
+  direct:
+    ## @param config.direct.adoptForeignCRs Take over CRs whose spec another field manager owns (e.g. still applied by Argo CD). Default false — such CRs are skipped (no apply, no delete) with an error; enable for one deliberate migration sync.
+    adoptForeignCRs: false
   ## @param config.gitProvider Git provider override: "" (auto-detect from repoUrl) | "auto" | "gitlab" | "github"
   ## When empty, the tool infers the provider from the repoUrl host (github.com / github.* →
   ## GitHub; everything else → GitLab). Override here to force a specific provider or to wire

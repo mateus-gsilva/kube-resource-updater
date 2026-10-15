@@ -490,6 +490,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 custom_objects_api=co_api,
                 core_v1_api=client.CoreV1Api() if cfg.is_direct else None,
                 prune_scope=prune_scope,
+                adopt_foreign_crs=cfg.direct_adopt_foreign_crs,
             )
         except GitPushError as exc:
             _log.error("[push] %s", exc)

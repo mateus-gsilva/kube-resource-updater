@@ -141,6 +141,7 @@ Opt-in is by Namespace annotation `kube-resource-updater.enabled: "true"`. Every
 | Name | Description | Value |
 | ---- | ----------- | ----- |
 | `config.writebackMode` | Write-back mode: "gitops" (commit to git) \| "direct" (apply to the cluster API) | `gitops` |
+| `config.direct.adoptForeignCRs` | Take over CRs whose spec another field manager owns (e.g. still applied by Argo CD). Default false — such CRs are skipped (no apply, no delete) with an error; enable for one deliberate migration sync. | `false` |
 | `config.gitProvider` | Git provider override: "" (auto-detect from repoUrl) \| "auto" \| "gitlab" \| "github" When empty, the tool infers the provider from the repoUrl host (github.com / github.* → GitHub; everything else → GitLab). Override here to force a specific provider or to wire GitHub Enterprise Server alongside a custom gitApiUrl. | `""` |
 | `config.dryRun` | Skip git/MR operations (log only) | `false` |
 | `config.createMr` | Open a GitLab MR (default) — false = direct push to crWriteback.branch | `true` |

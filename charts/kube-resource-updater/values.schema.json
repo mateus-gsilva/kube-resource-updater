@@ -65,6 +65,12 @@
       "type": "object",
       "properties": {
         "writebackMode": { "type": "string", "enum": ["gitops", "direct"] },
+        "direct": {
+          "type": "object",
+          "properties": {
+            "adoptForeignCRs": { "type": ["boolean", "string"] }
+          }
+        },
         "gitProvider": { "type": "string", "enum": ["", "auto", "gitlab", "github"] },
         "dryRun": { "type": ["boolean", "string"] },
         "createMr": { "type": ["boolean", "string"] },

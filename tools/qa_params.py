@@ -109,6 +109,7 @@ Run:
 #   section_direct_live_state_failure             direct mode — unreadable live CRs skip apply + prune for that namespace
 #   section_rollout_tick_resilience               autoRollout — tick loop survives non-ApiException errors
 #   section_rollout_slot_release                  autoRollout — slot release (timeout + consecutive read errors)
+#   section_direct_foreign_ownership              direct mode — foreign spec ownership + tracking-only strip
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12547,6 +12548,74 @@ def section_rollout_slot_release() -> None:
                "WEBHOOK_AUTO_ROLLOUT_TIMEOUT_SECONDS" in r.stdout and '"300"' in r.stdout, True)
 
 
+def section_direct_foreign_ownership() -> None:
+    """Direct mode must not silently take a CR away from another controller.
+
+    If a field manager other than `kube-resource-updater` owns `spec` (the CR
+    is still in an Argo CD Application, or was hand-applied), a forced apply
+    would steal it and the two would fight. Such CRs are skipped — for apply
+    and for orphan deletion — with an error, unless
+    `config.direct.adoptForeignCRs: true` is set for a deliberate migration.
+    Only tracking metadata is stripped; operator-set Argo CD options stay.
+    """
+    _section("direct mode — foreign spec ownership + tracking-only strip")
+
+    import tempfile as _tf
+    from unittest.mock import MagicMock as _MM
+    from src.config import Config as _Config
+    from src.writeback_webhook import WebhookEntry, _apply_direct, _argocd_tracking_metadata
+
+    with _tf.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        fh.write("config:\n  direct:\n    adoptForeignCRs: true\n")
+        path = fh.name
+    _check("[config] adoptForeignCRs read from config.direct", _Config.from_file(path).direct_adopt_foreign_crs, True)
+    os.unlink(path)
+    _check("[config] adoptForeignCRs defaults to false", _base_config().direct_adopt_foreign_crs, False)
+
+    argo_spec = [{"manager": "argocd-controller", "operation": "Apply",
+                  "fieldsV1": {"f:spec": {"f:containers": {}}}}]
+    live = {"containers": {"app": {"requests": {"cpu": "100m"}}}, "annotations": {},
+            "labels": {}, "managed_fields": argo_spec, "selector": {"app": "api"}, "uid": "u"}
+    e = WebhookEntry(namespace="ns", cr_name="api", selector_labels={"app": "api"},
+                     containers=[{"name": "app", "requests": {"cpu": "200m"}}])
+
+    def _run(adopt, state, items=None, entries=None):
+        co = _MM()
+        co.api_client.call_api.side_effect = lambda *a, **k: {"spec": k["body"]["spec"], "metadata": {}}
+        co.list_cluster_custom_object.return_value = {"items": items or []}
+        _apply_direct(entries or [e], state_lookup=state, global_dry_run=False,
+                      custom_objects_api=co, core_v1_api=_MM(), adopt_foreign=adopt)
+        return co
+
+    co = _run(False, {("ns", "api"): live})
+    _check("[foreign] spec owned by another manager → apply skipped", co.api_client.call_api.called, False)
+    co = _run(True, {("ns", "api"): live})
+    _check("[foreign] adoptForeignCRs=true → apply proceeds (deliberate migration)",
+           co.api_client.call_api.called, True)
+    own = dict(live, managed_fields=[{"manager": "kube-resource-updater", "operation": "Update",
+                                      "fieldsV1": {"f:spec": {}}}])
+    co = _run(False, {("ns", "api"): own})
+    _check("[foreign] the tool's own manager (Apply or Update) is not foreign",
+           co.api_client.call_api.called, True)
+    meta_only = dict(live, managed_fields=[{"manager": "kubectl-annotate", "fieldsV1": {
+        "f:metadata": {"f:annotations": {"f:team": {}}}}}])
+    co = _run(False, {("ns", "api"): meta_only})
+    _check("[foreign] another manager owning only metadata does not block",
+           co.api_client.call_api.called, True)
+    orphan = {"metadata": {"namespace": "ns", "name": "old",
+                           "labels": {"app.kubernetes.io/managed-by": "kube-resource-updater"},
+                           "managedFields": argo_spec}}
+    co = _run(False, {}, items=[orphan])
+    _check("[foreign] orphan whose spec another manager owns is not deleted",
+           co.delete_namespaced_custom_object.called, False)
+
+    anns, _labels = _argocd_tracking_metadata({"annotations": {
+        "argocd.argoproj.io/tracking-id": "x", "argocd.argoproj.io/sync-options": "Prune=false",
+        "argocd.argoproj.io/compare-options": "IgnoreExtraneous"}})
+    _check("[strip] only the tracking-id annotation is stripped (operator options kept)",
+           anns, ["argocd.argoproj.io/tracking-id"])
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12914,6 +12983,7 @@ def main() -> int:
     section_direct_live_state_failure()
     section_rollout_tick_resilience()
     section_rollout_slot_release()
+    section_direct_foreign_ownership()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 
