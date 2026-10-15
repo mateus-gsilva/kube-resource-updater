@@ -203,6 +203,22 @@ class WebhookEntry:
     dry_run: bool = False
 
 
+@dataclass
+class PruneScope:
+    """What direct-mode orphan deletion may touch this sync.
+
+    `keep`: `(namespace, cr_name)` of every workload discovery found —
+    whether or not it produced an entry (held, no Prometheus data, name too
+    long). Both the bare and the kind-prefixed CR name are listed, so a
+    later collision rename never reads as "gone". Workloads with
+    `skip: "true"` are left out on purpose: that is an explicit opt-out.
+    `blocked_namespaces`: discovery, a value query or the live-CR read
+    failed there this sync — nothing in them is deleted.
+    """
+    keep: set[tuple[str, str]] = field(default_factory=set)
+    blocked_namespaces: set[str] = field(default_factory=set)
+
+
 @dataclass(frozen=True)
 class HeldContainer:
     """One container whose recommendation a sample-quality gate held back.
@@ -239,6 +255,7 @@ def write_back_webhook_all(
     writeback_mode: str = "gitops",
     custom_objects_api=None,
     core_v1_api=None,
+    prune_scope: PruneScope | None = None,
 ) -> list[tuple[str, list[str]]] | None:
     """Generate ResourceOverride CR files and commit them to the configured central repo.
 
@@ -272,6 +289,10 @@ def write_back_webhook_all(
 
     # Compute the CR payloads up front (no git I/O yet). This means dry-run can show
     # the full set of files that *would* be written without cloning anything.
+    # Query errors are tracked per namespace across the build so direct mode
+    # can tell "no value" from "query failed".
+    from src.prometheus import query_error_namespaces, reset_query_errors
+    reset_query_errors()
     entries, held_report = _build_entries(
         workloads_with_configs,
         oom_state_lookup=oom_state_lookup,
@@ -297,12 +318,20 @@ def write_back_webhook_all(
     # default. Keeping the global OR preserves the existing --dry-run CLI /
     # cluster-ConfigMap behavior (set once, covers everything).
     if writeback_mode == "direct":
+        scope = prune_scope or PruneScope()
+        failed_queries = query_error_namespaces()
+        if failed_queries:
+            _log.warning("[direct] Prometheus queries failed in %s — no orphan deletion "
+                         "there this sync", ", ".join(sorted(failed_queries)))
+        scope = PruneScope(keep=set(scope.keep),
+                           blocked_namespaces=set(scope.blocked_namespaces) | failed_queries)
         return _apply_direct(
             entries,
             state_lookup=oom_state_lookup or {},
             global_dry_run=dry_run,
             custom_objects_api=custom_objects_api,
             core_v1_api=core_v1_api,
+            prune_scope=scope,
         )
 
     dry_entries = [e for e in entries if e.dry_run or dry_run]
@@ -2228,6 +2257,7 @@ def _apply_direct(
     global_dry_run: bool,
     custom_objects_api,
     core_v1_api,
+    prune_scope: PruneScope | None = None,
 ) -> list[tuple[str, list[str]]] | None:
     """Server-side apply every entry and delete tool-owned CRs no longer wanted.
 
@@ -2296,7 +2326,8 @@ def _apply_direct(
         applied.append(e)
 
     deleted = _prune_orphan_crs(entries, global_dry_run=global_dry_run,
-                                custom_objects_api=custom_objects_api)
+                                custom_objects_api=custom_objects_api,
+                                prune_scope=prune_scope)
     _log.info("[direct] %d applied, %d unchanged, %d failed, %d orphan(s) deleted",
               len(applied), unchanged, failed, len(deleted))
     if not applied and not deleted:
@@ -2310,13 +2341,23 @@ def _prune_orphan_crs(
     *,
     global_dry_run: bool,
     custom_objects_api,
+    prune_scope: PruneScope | None = None,
 ) -> list[tuple[str, str]]:
-    """Delete tool-labelled CRs that no entry of this sync renders."""
+    """Delete tool-labelled CRs whose workload is gone.
+
+    Kept: every entry of this sync plus every workload in `prune_scope.keep`
+    (discovered, even without an entry). Nothing is deleted in a blocked
+    namespace. Without a scope only the entries are kept (unit callers).
+    """
     from kubernetes.client.rest import ApiException
 
     if not entries:
         return []
     keep = {(e.namespace, e.cr_name) for e in entries}
+    blocked: set[str] = set()
+    if prune_scope is not None:
+        keep |= prune_scope.keep
+        blocked = prune_scope.blocked_namespaces
     try:
         listing = custom_objects_api.list_cluster_custom_object(
             CR_GROUP, CR_VERSION, CR_PLURAL,
@@ -2331,6 +2372,10 @@ def _prune_orphan_crs(
         meta = item.get("metadata") or {}
         ns, name = meta.get("namespace"), meta.get("name")
         if not ns or not name or (ns, name) in keep:
+            continue
+        if ns in blocked:
+            _log.info("[direct] keeping %s/%s: namespace had a discovery / query failure "
+                      "this sync", ns, name)
             continue
         if (meta.get("labels") or {}).get(MANAGED_BY_LABEL) != MANAGED_BY_VALUE:
             continue  # defence in depth against a selector-ignoring API

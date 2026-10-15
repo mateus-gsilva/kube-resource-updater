@@ -105,6 +105,7 @@ Run:
 #   section_mr_work_branch                         config.mr.workBranch — configurable MR source branch
 #   section_github_status_wording                  GitHub provider status wording
 #   section_dry_run_entry_keeps_committed_doc     per-workload dryRun — committed CR doc carried forward, not dropped
+#   section_direct_prune_partial_failure          direct mode — prune survives partial discovery / Prometheus failure
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12214,6 +12215,135 @@ def section_dry_run_entry_keeps_committed_doc() -> None:
     _check("[dry-keep] namespace file not pruned", written.get("removed"), None)
 
 
+def section_direct_prune_partial_failure() -> None:
+    """Direct-mode orphan deletion must survive PARTIAL failures.
+
+    Entries go missing for reasons that say nothing about the workload being
+    gone: a per-kind list error during discovery, a failed Prometheus query
+    leaving every container without values, a held container, a CR name that
+    is too long. Only a CR whose workload was genuinely not discovered (in a
+    namespace whose discovery and queries all succeeded), whose workload
+    carries `skip: "true"`, or whose namespace stopped opting in may go.
+    """
+    _section("direct mode — prune survives partial discovery / Prometheus failure")
+
+    import argparse as _argparse
+    from unittest.mock import MagicMock as _MM
+    import main as _main
+    from src import prometheus as _prom
+    from src.config import Config as _Config, CrWritebackConfig as _CRW, ResourceConfig as _RC
+    from src.discovery import NamespaceTarget as _NsT
+    from src.workload import (
+        ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec, list_workloads,
+    )
+    from src.writeback_webhook import (
+        PruneScope, WebhookEntry, _apply_direct, write_back_webhook_all,
+    )
+
+    # ── Prometheus query errors are recorded per namespace ──────────────
+    _prom.reset_query_errors()
+    with patch("src.prometheus.requests.get", side_effect=ConnectionError("down")):
+        _prom.query_cpu_request_m("http://p-err", "ns-prom", "app", "api", 0.9, "3d")
+    _check("[prom] failed value query records its namespace",
+           _prom.query_error_namespaces(), {"ns-prom"})
+    _prom.reset_query_errors()
+    _check("[prom] reset clears the record", _prom.query_error_namespaces(), set())
+
+    # ── Discovery reports namespaces with a per-kind list error ─────────
+    apps = _MM()
+
+    def _deps(ns):
+        if ns == "ns-broken":
+            raise RuntimeError("apiserver 500")
+        return _MM(items=[])
+    apps.list_namespaced_deployment.side_effect = _deps
+    apps.list_namespaced_stateful_set.return_value = _MM(items=[])
+    apps.list_namespaced_daemon_set.return_value = _MM(items=[])
+    failed: set = set()
+    list_workloads(apps, ["ns-ok", "ns-broken"], batch_api=_MM(), failed_namespaces=failed)
+    _check("[discovery] per-kind list error reported for its namespace", failed, {"ns-broken"})
+
+    # ── Prune decisions ─────────────────────────────────────────────────
+    def _item(ns, name):
+        return {"metadata": {"namespace": ns, "name": name,
+                             "labels": {"app.kubernetes.io/managed-by": "kube-resource-updater"}}}
+    items = [_item("ns", "api"), _item("ns", "held"), _item("ns", "gone"),
+             _item("ns", "skipped"), _item("ns-prom", "x"), _item("ns-broken", "y"),
+             _item("old-ns", "z")]
+    co = _MM()
+    co.api_client.call_api.side_effect = lambda *a, **k: {"spec": k["body"]["spec"],
+                                                           "metadata": {}}
+    co.list_cluster_custom_object.return_value = {"items": items}
+    entry = WebhookEntry(namespace="ns", cr_name="api", selector_labels={"app": "api"},
+                         containers=[{"name": "app", "requests": {"cpu": "1m"}}])
+    scope = PruneScope(keep={("ns", "api"), ("ns", "held")},
+                       blocked_namespaces={"ns-prom", "ns-broken"})
+    _apply_direct([entry], state_lookup={}, global_dry_run=False,
+                  custom_objects_api=co, core_v1_api=_MM(), prune_scope=scope)
+    deleted = sorted((c.args[2], c.args[4]) for c in co.delete_namespaced_custom_object.call_args_list)
+    _check("[prune] only genuinely-gone / opted-out / no-longer-opted-in CRs deleted",
+           deleted, [("ns", "gone"), ("ns", "skipped"), ("old-ns", "z")])
+
+    # ── write_back_webhook_all blocks namespaces whose queries failed ───
+    captured = {}
+
+    def _fake_apply(entries, **kw):
+        captured.update(kw)
+        return None
+
+    def _fake_build(*a, **k):
+        _prom._record_query_error("ns-prom")
+        return ([entry], [])
+
+    with patch("src.writeback_webhook._build_entries", side_effect=_fake_build), \
+         patch("src.writeback_webhook._apply_direct", side_effect=_fake_apply):
+        write_back_webhook_all(
+            workloads_with_configs=[(None, None)], cr_writeback=_CRW(), provider=None,
+            git_author_name="", git_author_email="", writeback_mode="direct",
+            custom_objects_api=co, core_v1_api=_MM(),
+            prune_scope=PruneScope(keep=set(), blocked_namespaces={"ns-broken"}),
+        )
+    blocked = captured.get("prune_scope").blocked_namespaces if captured.get("prune_scope") else set()
+    _check("[route] a namespace with a failed Prometheus query this sync is blocked from prune",
+           sorted(blocked), ["ns-broken", "ns-prom"])
+
+    # ── cmd_sync builds the scope from discovery ────────────────────────
+    cfg = _Config(gitlab_url="", gitlab_token="", gitlab_username="", git_author_name="k",
+                  git_author_email="k@e", dry_run=False, create_mr=True, min_cpu_limit_m=0,
+                  min_memory_limit_mi=0, prometheus_url="http://prom:9090", resource=_RC(),
+                  cr_writeback=_CRW(), writeback_mode="direct")
+    recs = [
+        _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+              containers=[_CRec(container_name="app")]),
+        _WRec(name="skipped", namespace="ns", target_kind="Deployment", target_name="skipped",
+              containers=[_CRec(container_name="app")],
+              annotations={"kube-resource-updater.skip": "true"}),
+    ]
+    got = {}
+
+    def _fake_list(apps_api, namespaces, batch_api=None, failed_namespaces=None):
+        if failed_namespaces is not None:
+            failed_namespaces.add("ns-broken")
+        return recs
+    with patch("main.Config") as mock_cfg_cls, patch("main._log_module.setup"), \
+         patch("main.load_config"), \
+         patch("main.list_enabled_namespaces", return_value=[_NsT(name="ns", annotations={}),
+                                                             _NsT(name="ns-broken", annotations={})]), \
+         patch("main.list_workloads", side_effect=_fake_list), patch("main.client"), \
+         patch("src.writeback_webhook.fetch_oom_state", return_value={}), \
+         patch("src.writeback_webhook.detect_oom_events", return_value={}), \
+         patch("main.write_back_webhook_all", side_effect=lambda **kw: got.update(kw)):
+        mock_cfg_cls.load.return_value = cfg
+        _main.cmd_sync(_argparse.Namespace(mr=None))
+    sc = got.get("prune_scope")
+    _check("[sync] discovered workloads are kept (bare and kind-prefixed CR names)",
+           bool(sc) and {("ns", "api"), ("ns", "deployment-api")} <= sc.keep, True)
+    _check("[sync] a workload with skip=true is not kept (explicit opt-out may be pruned)",
+           bool(sc) and ("ns", "skipped") in sc.keep, False)
+    _check("[sync] namespace with a discovery error is blocked from prune",
+           bool(sc) and "ns-broken" in sc.blocked_namespaces, True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12577,6 +12707,7 @@ def main() -> int:
     section_mr_work_branch()
     section_github_status_wording()
     section_dry_run_entry_keeps_committed_doc()
+    section_direct_prune_partial_failure()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

@@ -253,7 +253,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         # 2. List workloads in each opted-in namespace.
         apps_api = client.AppsV1Api()
         batch_api = client.BatchV1Api()
-        workloads = list_workloads(apps_api, [t.name for t in targets], batch_api=batch_api)
+        discovery_failed: set[str] = set()
+        workloads = list_workloads(apps_api, [t.name for t in targets], batch_api=batch_api,
+                                   failed_namespaces=discovery_failed)
 
         if not workloads:
             _log_module.log_phase_banner(_log, "discovery",
@@ -438,6 +440,23 @@ def cmd_sync(args: argparse.Namespace) -> int:
         # buckets entries by `create_mr` and emits up to two pushes per repo:
         # one direct, one MR. The CLI flag `--mr` still flips
         # the helm-level default before resolution, kept for local dev parity.
+        # Direct mode deletes tool-owned CRs whose workload is gone; this is
+        # the evidence for "gone". Every discovered workload counts as kept,
+        # whether or not it produced a CR this sync — only an explicit
+        # `skip: "true"` lets its CR go.
+        from src.writeback_webhook import PruneScope
+        prune_scope = PruneScope(
+            keep={
+                (w.namespace, name)
+                for w in workloads if not is_workload_skipped(w.annotations)
+                for name in (w.target_name, f"{w.target_kind.lower()}-{w.target_name}")
+            },
+            blocked_namespaces=set(discovery_failed),
+        )
+        if cfg.is_direct and discovery_failed:
+            _log.warning("[direct] workload discovery incomplete in %s — no orphan deletion "
+                         "there this sync", ", ".join(sorted(discovery_failed)))
+
         provider = None if cfg.is_direct else build_provider(
             repo_url=cfg.cr_writeback.repo_url,
             token=cfg.git_token,
@@ -467,6 +486,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 writeback_mode=cfg.writeback_mode,
                 custom_objects_api=co_api,
                 core_v1_api=client.CoreV1Api() if cfg.is_direct else None,
+                prune_scope=prune_scope,
             )
         except GitPushError as exc:
             _log.error("[push] %s", exc)

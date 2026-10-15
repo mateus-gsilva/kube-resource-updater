@@ -118,9 +118,14 @@ def list_workloads_in_namespace(
     apps_api: client.AppsV1Api,
     namespace: str,
     batch_api: "client.BatchV1Api | None" = None,
+    failed_namespaces: "set[str] | None" = None,
 ) -> list[WorkloadRecommendation]:
     """Discover Deployments, StatefulSets, DaemonSets, and CronJobs in a
     single namespace.
+
+    A per-kind list error is logged and the namespace added to
+    ``failed_namespaces`` (when given): the result is then incomplete, so a
+    caller must not read a missing workload as a deleted one.
 
     Each kind carries its own template accessor and skip predicate so the
     loop body stays uniform:
@@ -221,6 +226,8 @@ def list_workloads_in_namespace(
                 ))
         except Exception as exc:
             _log.warning("Failed to list %ss in %s: %s", kind, namespace, exc)
+            if failed_namespaces is not None:
+                failed_namespaces.add(namespace)
     return results
 
 
@@ -228,6 +235,7 @@ def list_workloads(
     apps_api: client.AppsV1Api,
     namespaces: list[str],
     batch_api: "client.BatchV1Api | None" = None,
+    failed_namespaces: "set[str] | None" = None,
 ) -> list[WorkloadRecommendation]:
     """Discover workloads across many namespaces in one call.
 
@@ -244,5 +252,6 @@ def list_workloads(
         if ns in seen:
             continue
         seen.add(ns)
-        out.extend(list_workloads_in_namespace(apps_api, ns, batch_api=batch_api))
+        out.extend(list_workloads_in_namespace(apps_api, ns, batch_api=batch_api,
+                                               failed_namespaces=failed_namespaces))
     return out
