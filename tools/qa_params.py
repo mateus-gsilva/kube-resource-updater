@@ -100,6 +100,7 @@ Run:
 #   section_change_audit_and_cooldown             Change audit annotations + cooldownHours
 #   section_writeback_direct_mode                  writebackMode=direct — server-side apply + audit + orphan delete
 #   section_cronjob_suspend                        cronjob.suspend — kill switch
+#   section_rollout_replay_and_concurrency         autoRollout — replay suppression + concurrency limit
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -1219,8 +1220,10 @@ def section_auto_rollout() -> None:
     trig.handle_event("MODIFIED", ro, ro)
     _check("[debounce] same resources → no pending entry", len(trig._pending), 0)
 
-    # _fire_due force-flushes regardless of timer.
-    trig.handle_event("ADDED", ro, None)
+    # _fire_due force-flushes regardless of timer. (A changed CR: an ADDED
+    # carrying the same resources the trigger last saw is a replay and is
+    # suppressed — see section_rollout_replay_and_concurrency.)
+    trig.handle_event("ADDED", ro_changed, None)
     trig._fire_due(force=True)
     _check("[debounce] force-flush calls patch_namespaced_deployment",
            fake_apps.patch_namespaced_deployment.called, True)
@@ -11798,6 +11801,176 @@ def section_cronjob_suspend() -> None:
     _check("[suspend] non-boolean rejected by the schema", rc != 0, True)
 
 
+def section_rollout_replay_and_concurrency() -> None:
+    """autoRollout safety.
+
+    (a) A restart fires only when a CR's resources differ from the last state
+        the webhook knew. Watch replays (ADDED for an object already cached,
+        duplicate MODIFIED) and the initial list after a (re)connect seed
+        that state instead of restarting.
+    (b) `maxConcurrent` bounds how many workload rollouts run at once
+        (a rollout counts until the controller reports it complete, or a
+        timeout) and `minIntervalSeconds` spaces consecutive restarts; due
+        restarts beyond that queue instead of firing together.
+    """
+    _section("autoRollout — replay suppression + concurrency limit")
+
+    import datetime as _dt
+    from unittest.mock import MagicMock as _MM
+    from src.webhook_cache import ContainerOverride, ResourceOverride, ResourceOverrideCache
+    from src.webhook_rollout import RolloutTrigger
+
+    def _ro(name, cpu="100m"):
+        return ResourceOverride(namespace="ns", name=name, selector_match_labels={"app": name},
+                                containers=(ContainerOverride(name="c", requests={"cpu": cpu},
+                                                              limits={}),))
+
+    def _deploy(name):
+        d = _MM()
+        d.metadata.name = name
+        d.metadata.annotations = {}
+        d.spec.template.metadata.labels = {"app": name}
+        return d
+
+    names = ["a", "b", "c"]
+    apps = _MM()
+    apps.list_namespaced_deployment.return_value = _MM(items=[_deploy(n) for n in names])
+    apps.list_namespaced_stateful_set.return_value = _MM(items=[])
+    apps.list_namespaced_daemon_set.return_value = _MM(items=[])
+    ns_cache = _MM()
+    ns_cache.annotations.return_value = {}
+
+    def _trig(**kw):
+        return RolloutTrigger(apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True,
+                              debounce_seconds=999, **kw)
+
+    # ── (a) replay suppression ──────────────────────────────────────────
+    t = _trig()
+    t.handle_event("ADDED", _ro("a"), _ro("a"))
+    _check("[replay] ADDED replay of an already-cached, identical CR → no restart",
+           len(t._pending), 0)
+    t.seed([_ro("a")])
+    t.handle_event("ADDED", _ro("a"), None)
+    _check("[replay] ADDED for a CR seeded from the initial list → no restart",
+           len(t._pending), 0)
+    t.handle_event("ADDED", _ro("a", cpu="200m"), None)
+    _check("[replay] ADDED whose resources differ from the seeded state → restart",
+           len(t._pending), 1)
+    t._pending.clear()
+    t.handle_event("MODIFIED", _ro("a", cpu="200m"), None)
+    _check("[replay] duplicate delivery of the same new state → no second restart",
+           len(t._pending), 0)
+    t.handle_event("ADDED", _ro("brand-new"), None)
+    _check("[replay] a genuinely new CR (never seen) is still a restart candidate",
+           apps.list_namespaced_deployment.called, True)
+    t2 = _trig()
+    t2.handle_event("DELETED", _ro("a"), _ro("a"))
+    t2.handle_event("ADDED", _ro("a"), None)
+    _check("[replay] re-created after delete → candidate again", len(t2._pending), 1)
+
+    seeded: list = []
+    api = _MM()
+    api.list_cluster_custom_object.return_value = {
+        "metadata": {"resourceVersion": "1"},
+        "items": [{"metadata": {"namespace": "ns", "name": "a"},
+                   "spec": {"selector": {"matchLabels": {"app": "a"}},
+                            "containers": [{"name": "c", "requests": {"cpu": "100m"}}]}}]}
+    events: list = []
+    cache = ResourceOverrideCache(api, event_callback=lambda *a: events.append(a),
+                                  seed_callback=lambda ros: seeded.extend(ros))
+    cache._initial_list()
+    _check("[seed] bootstrap list seeds the trigger", [r.name for r in seeded], ["a"])
+    _check("[seed] bootstrap list fires no events", events, [])
+    seeded.clear()
+    cache._initial_list()
+    _check("[seed] reconnect re-list seeds the trigger again", [r.name for r in seeded], ["a"])
+    _check("[seed] reconnect with nothing changed fires no events", events, [])
+
+    # ── (b) concurrency limit ───────────────────────────────────────────
+    past = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=5)
+
+    def _due(trig):
+        for n in names:
+            trig.handle_event("ADDED", _ro(n), None)
+        for entry in trig._pending.values():
+            entry.fire_at = past
+
+    status = {"done": False}
+
+    def _read(name, namespace):
+        d = _MM()
+        d.metadata.generation = 2
+        d.spec.replicas = 2
+        d.status.observed_generation = 2 if status["done"] else 1
+        d.status.updated_replicas = 2 if status["done"] else 1
+        d.status.available_replicas = 2 if status["done"] else 1
+        return d
+
+    apps.read_namespaced_deployment.side_effect = _read
+    apps.patch_namespaced_deployment.reset_mock()
+    t = _trig(max_concurrent=1, min_interval_seconds=0)
+    _check("[limit] default maxConcurrent is 1", RolloutTrigger(
+        apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True)._max_concurrent, 1)
+    _due(t)
+    t._fire_due()
+    _check("[limit] 3 due restarts, maxConcurrent=1 → exactly 1 fired",
+           apps.patch_namespaced_deployment.call_count, 1)
+    _check("[limit] the other 2 stay queued", len(t._pending), 2)
+    t._fire_due()
+    _check("[limit] rollout still in progress → nothing more fired",
+           apps.patch_namespaced_deployment.call_count, 1)
+    status["done"] = True
+    t._fire_due()
+    _check("[limit] rollout complete → next queued restart fires",
+           apps.patch_namespaced_deployment.call_count, 2)
+    status["done"] = False
+    t._in_flight = {k: v - _dt.timedelta(seconds=10_000) for k, v in t._in_flight.items()}
+    t._fire_due()
+    _check("[limit] a rollout stuck past the timeout frees its slot",
+           apps.patch_namespaced_deployment.call_count, 3)
+
+    apps.patch_namespaced_deployment.reset_mock()
+    t = _trig(max_concurrent=0, min_interval_seconds=60)
+    _due(t)
+    t._fire_due()
+    _check("[interval] minIntervalSeconds=60 → one restart per interval",
+           apps.patch_namespaced_deployment.call_count, 1)
+    t._fire_due()
+    _check("[interval] second tick inside the interval fires nothing",
+           apps.patch_namespaced_deployment.call_count, 1)
+    t._last_fire_at -= _dt.timedelta(seconds=61)
+    t._fire_due()
+    _check("[interval] after the interval the next restart fires",
+           apps.patch_namespaced_deployment.call_count, 2)
+    apps.patch_namespaced_deployment.reset_mock()
+    t = _trig(max_concurrent=0, min_interval_seconds=0)
+    _due(t)
+    t._fire_due()
+    _check("[limit] maxConcurrent=0 + no interval → unlimited (previous behaviour)",
+           apps.patch_namespaced_deployment.call_count, 3)
+
+    # ── Chart wiring ────────────────────────────────────────────────────
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    chart_dir = _chart_dir()
+    if not helm or not os.path.isdir(chart_dir):
+        print(f"  [{_SKIP}] helm CLI or chart dir unavailable")
+        return
+    r = subprocess.run(
+        [helm, "template", "kru", chart_dir, "--set", "config.prometheusUrl=http://p:9090",
+         "--set", "config.writebackMode=direct", "--set", "webhook.enabled=true",
+         "--set", "webhook.autoRollout.enabled=true",
+         "--set", "webhook.autoRollout.maxConcurrent=3",
+         "--show-only", "templates/webhook/deployment.yaml"],
+        capture_output=True, text=True)
+    _check("[chart] webhook renders", r.returncode, 0)
+    _check("[chart] WEBHOOK_AUTO_ROLLOUT_MAX_CONCURRENT wired",
+           "WEBHOOK_AUTO_ROLLOUT_MAX_CONCURRENT" in r.stdout and '"3"' in r.stdout, True)
+    _check("[chart] WEBHOOK_AUTO_ROLLOUT_MIN_INTERVAL_SECONDS wired",
+           "WEBHOOK_AUTO_ROLLOUT_MIN_INTERVAL_SECONDS" in r.stdout, True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12156,6 +12329,7 @@ def main() -> int:
     section_change_audit_and_cooldown()
     section_writeback_direct_mode()
     section_cronjob_suspend()
+    section_rollout_replay_and_concurrency()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

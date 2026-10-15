@@ -123,6 +123,7 @@ class ResourceOverrideCache:
         self,
         api: client.CustomObjectsApi,
         event_callback: Callable[[str, ResourceOverride, ResourceOverride | None], None] | None = None,
+        seed_callback: Callable[[list[ResourceOverride]], None] | None = None,
     ):
         self._api = api
         self._index: dict[str, _NamespaceIndex] = {}
@@ -135,6 +136,9 @@ class ResourceOverrideCache:
         # event. Receives (event_type, new_ro, prev_ro). Used by the
         # rollout trigger; left None when the controller surface is off.
         self._event_callback = event_callback
+        # Receives the full CR list after every (re)list, after any synthetic
+        # events — consumers record it as last-known state (no side effects).
+        self._seed_callback = seed_callback
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -296,6 +300,11 @@ class ResourceOverrideCache:
         else:
             _log.info("resource-override cache populated: %d CRs across %d namespaces",
                       cr_count, len(new_index))
+        if self._seed_callback is not None:
+            try:
+                self._seed_callback(list(new_flat.values()))
+            except Exception:
+                _log.exception("[cr-cache] seed callback raised")
 
     def _watch_loop(self) -> None:
         w = watch.Watch()

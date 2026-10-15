@@ -569,6 +569,14 @@ def cmd_webhook(args: argparse.Namespace) -> int:
         auto_rollout_debounce = int(os.environ.get("WEBHOOK_AUTO_ROLLOUT_DEBOUNCE_SECONDS", "30"))
     except ValueError:
         auto_rollout_debounce = 30
+    try:
+        auto_rollout_max_concurrent = int(os.environ.get("WEBHOOK_AUTO_ROLLOUT_MAX_CONCURRENT", "1"))
+    except ValueError:
+        auto_rollout_max_concurrent = 1
+    try:
+        auto_rollout_min_interval = int(os.environ.get("WEBHOOK_AUTO_ROLLOUT_MIN_INTERVAL_SECONDS", "0"))
+    except ValueError:
+        auto_rollout_min_interval = 0
     run_webhook(
         port=args.port,
         cert_dir=args.cert_dir,
@@ -578,6 +586,8 @@ def cmd_webhook(args: argparse.Namespace) -> int:
         status_flush_interval_seconds=status_flush,
         auto_rollout_enabled=auto_rollout_enabled,
         auto_rollout_debounce_seconds=auto_rollout_debounce,
+        auto_rollout_max_concurrent=auto_rollout_max_concurrent,
+        auto_rollout_min_interval_seconds=auto_rollout_min_interval,
     )
     return 0
 

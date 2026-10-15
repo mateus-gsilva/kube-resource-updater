@@ -753,6 +753,15 @@ webhook:
     enabled: false
     ## @param webhook.autoRollout.debounceSeconds How long to wait after the last CR change before patching the workload's PodTemplate.
     debounceSeconds: 30
+    ## Rate limit so one sync that changes many CRs does not restart every
+    ## workload at once. A restart counts as in progress until its controller
+    ## reports the rollout complete (or 10 minutes pass); due restarts beyond
+    ## the limit queue in order. Watch replays and webhook reconnects never
+    ## trigger restarts on their own — only a real change of a CR's resources.
+    ## @param webhook.autoRollout.maxConcurrent Max workload rollouts in progress at once (0 = unlimited)
+    maxConcurrent: 1
+    ## @param webhook.autoRollout.minIntervalSeconds Minimum seconds between two restarts (0 = no spacing)
+    minIntervalSeconds: 0
 
   ## Status writer — populates ResourceOverride.status.appliedToPodCount and
   ## .status.lastAppliedAt so `kubectl get ro -A` becomes a real adoption

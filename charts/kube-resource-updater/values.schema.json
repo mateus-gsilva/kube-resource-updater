@@ -269,7 +269,9 @@
           "type": "object",
           "properties": {
             "enabled": { "type": "boolean" },
-            "debounceSeconds": { "type": ["integer", "string"] }
+            "debounceSeconds": { "type": ["integer", "string"] },
+            "maxConcurrent": { "type": ["integer", "string"] },
+            "minIntervalSeconds": { "type": ["integer", "string"] }
           }
         },
         "status": {
