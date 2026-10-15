@@ -107,6 +107,8 @@ Run:
 #   section_dry_run_entry_keeps_committed_doc     per-workload dryRun — committed CR doc carried forward, not dropped
 #   section_direct_prune_partial_failure          direct mode — prune survives partial discovery / Prometheus failure
 #   section_direct_live_state_failure             direct mode — unreadable live CRs skip apply + prune for that namespace
+#   section_rollout_tick_resilience               autoRollout — tick loop survives non-ApiException errors
+#   section_rollout_slot_release                  autoRollout — slot release (timeout + consecutive read errors)
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12415,6 +12417,136 @@ def section_direct_live_state_failure() -> None:
            bool(sc) and sc.unreadable_namespaces, {"ns-bad"})
 
 
+def section_rollout_tick_resilience() -> None:
+    """The rollout daemon thread must survive anything a tick throws — a
+    urllib3 connection error, a workload whose `.status` is still None —
+    instead of dying silently and never restarting another workload."""
+    _section("autoRollout — tick loop survives non-ApiException errors")
+
+    import datetime as _dt
+    import threading as _th
+    from unittest.mock import MagicMock as _MM
+    from src.webhook_cache import ContainerOverride, ResourceOverride
+    from src.webhook_rollout import RolloutTrigger
+
+    apps = _MM()
+    d = _MM()
+    d.metadata.name = "a"
+    d.metadata.annotations = {}
+    d.spec.template.metadata.labels = {"app": "a"}
+    apps.list_namespaced_deployment.return_value = _MM(items=[d])
+    apps.list_namespaced_stateful_set.return_value = _MM(items=[])
+    apps.list_namespaced_daemon_set.return_value = _MM(items=[])
+    ns_cache = _MM()
+    ns_cache.annotations.return_value = {}
+    t = RolloutTrigger(apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True,
+                       debounce_seconds=999, max_concurrent=1)
+    key = ("ns", "Deployment", "a")
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    # status None → not complete, no exception.
+    obj = _MM()
+    obj.status = None
+    obj.metadata.generation = 1
+    apps.read_namespaced_deployment.return_value = obj
+    try:
+        done = t._rollout_complete("ns", "Deployment", "a")
+        err = None
+    except Exception as exc:  # noqa: BLE001
+        done, err = None, exc
+    _check("[none-safe] workload with status=None → not complete, no exception",
+           (done, err), (False, None))
+
+    # Connection error during the in-flight refresh must not escape.
+    apps.read_namespaced_deployment.side_effect = ConnectionError("apiserver unreachable")
+    t._in_flight[key] = now
+    try:
+        t._fire_due()
+        escaped = None
+    except Exception as exc:  # noqa: BLE001
+        escaped = exc
+    _check("[tick] ConnectionError while reading rollout status does not escape _fire_due",
+           escaped, None)
+
+    # Connection error on the restart PATCH is retried like a transient API error.
+    t2 = RolloutTrigger(apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True,
+                        debounce_seconds=999, max_concurrent=0)
+    apps.patch_namespaced_deployment.side_effect = ConnectionError("reset")
+    t2.handle_event("ADDED", ResourceOverride(
+        namespace="ns", name="a", selector_match_labels={"app": "a"},
+        containers=(ContainerOverride(name="c", requests={"cpu": "1m"}, limits={}),)), None)
+    try:
+        t2._fire_due(force=True)
+        escaped = None
+    except Exception as exc:  # noqa: BLE001
+        escaped = exc
+    _check("[tick] ConnectionError on the restart PATCH does not escape", escaped, None)
+    _check("[tick] failed restart is re-queued for retry, not dropped", len(t2._pending), 1)
+    apps.patch_namespaced_deployment.side_effect = None
+
+    # The loop itself keeps going when a tick raises.
+    t3 = RolloutTrigger(apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True,
+                        debounce_seconds=1)
+    calls = {"n": 0}
+
+    def _boom(**_kw):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            t3._stop.set()
+        raise RuntimeError("unexpected")
+    t3._fire_due = _boom
+    t3._tick_interval = 0.01
+    th = _th.Thread(target=t3._tick_loop, daemon=True)
+    th.start()
+    th.join(timeout=3)
+    _check("[tick] loop survives a raising tick and keeps ticking", calls["n"] >= 2, True)
+    _check("[tick] loop exits on stop", th.is_alive(), False)
+
+
+
+def section_rollout_slot_release() -> None:
+    """A concurrency slot held by a rollout whose status cannot be read (or
+    that is stuck) is released after `rolloutTimeoutSeconds` (configurable)
+    or after 3 consecutive read errors, whichever comes first."""
+    _section("autoRollout — slot release (timeout + consecutive read errors)")
+
+    import datetime as _dt
+    from unittest.mock import MagicMock as _MM
+    from src.webhook_rollout import RolloutTrigger
+    apps = _MM()
+    ns_cache = _MM()
+    key = ("ns", "Deployment", "a")
+    # ── slot release: configurable timeout + consecutive read errors ────
+    t4 = RolloutTrigger(apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True,
+                        max_concurrent=1, rollout_timeout_seconds=120)
+    _check("[timeout] rolloutTimeoutSeconds is configurable",
+           t4._rollout_timeout.total_seconds(), 120.0)
+    from kubernetes.client.rest import ApiException
+    apps.read_namespaced_deployment.side_effect = ApiException(status=500)
+    t4._in_flight[key] = _dt.datetime.now(_dt.timezone.utc)
+    for _ in range(2):
+        t4._refresh_in_flight(_dt.datetime.now(_dt.timezone.utc))
+    _check("[errors] two consecutive read errors keep the slot", key in t4._in_flight, True)
+    t4._refresh_in_flight(_dt.datetime.now(_dt.timezone.utc))
+    _check("[errors] third consecutive read error releases the slot", key in t4._in_flight, False)
+    apps.read_namespaced_deployment.side_effect = None
+
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    chart_dir = _chart_dir()
+    if helm and os.path.isdir(chart_dir):
+        r = subprocess.run(
+            [helm, "template", "kru", chart_dir, "--set", "config.prometheusUrl=http://p:9090",
+             "--set", "config.writebackMode=direct", "--set", "webhook.enabled=true",
+             "--set", "webhook.autoRollout.enabled=true",
+             "--set", "webhook.autoRollout.rolloutTimeoutSeconds=300",
+             "--show-only", "templates/webhook/deployment.yaml"],
+            capture_output=True, text=True)
+        _check("[chart] WEBHOOK_AUTO_ROLLOUT_TIMEOUT_SECONDS wired",
+               "WEBHOOK_AUTO_ROLLOUT_TIMEOUT_SECONDS" in r.stdout and '"300"' in r.stdout, True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12780,6 +12912,7 @@ def main() -> int:
     section_dry_run_entry_keeps_committed_doc()
     section_direct_prune_partial_failure()
     section_direct_live_state_failure()
+    section_rollout_tick_resilience()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

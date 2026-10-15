@@ -323,13 +323,23 @@ class RolloutTrigger:
             for key in to_drop:
                 del self._pending[key]
 
+    # Seconds between ticks; fire_at granularity is ~1s, no need to spin.
+    _tick_interval = 1.0
+
     def _tick_loop(self) -> None:
-        # Sleep in 1s slices so stop() returns quickly. fire_at granularity
-        # is ~1s; no need to spin.
-        while not self._stop.wait(1.0):
-            self._fire_due()
+        # One failing tick (connection error, unexpected API shape) must not
+        # kill the daemon thread: it would die silently and no workload would
+        # ever be restarted again until the pod restarts.
+        while not self._stop.wait(self._tick_interval):
+            try:
+                self._fire_due()
+            except Exception:
+                _log.exception("[rollout] tick failed — will retry on the next tick")
         # Drain remaining timers on shutdown.
-        self._fire_due(force=True)
+        try:
+            self._fire_due(force=True)
+        except Exception:
+            _log.exception("[rollout] shutdown drain failed")
 
     def _fire_due(self, *, force: bool = False) -> None:
         """Restart due workloads within the concurrency / interval budget.
@@ -380,6 +390,10 @@ class RolloutTrigger:
                 done = self._rollout_complete(*key)
             except ApiException as exc:
                 done = getattr(exc, "status", None) == 404
+            except Exception as exc:  # noqa: BLE001 — connection errors, odd shapes
+                _log.warning("[rollout] could not read rollout status of %s/%s %s: %s",
+                             key[0], key[1], key[2], exc)
+                done = False
             if done:
                 del self._in_flight[key]
 
@@ -393,13 +407,17 @@ class RolloutTrigger:
             obj = self._apps.read_namespaced_daemon_set(name, namespace)
         else:
             return True
-        st = obj.status
-        if (st.observed_generation or 0) < (obj.metadata.generation or 0):
+        st = getattr(obj, "status", None)
+        if st is None:
+            return False  # controller has not reported yet
+        meta = getattr(obj, "metadata", None)
+        if (st.observed_generation or 0) < ((meta.generation if meta else 0) or 0):
             return False
         if kind == "DaemonSet":
             want = st.desired_number_scheduled or 0
             return (st.updated_number_scheduled or 0) >= want and (st.number_available or 0) >= want
-        want = obj.spec.replicas if obj.spec.replicas is not None else 1
+        spec = getattr(obj, "spec", None)
+        want = spec.replicas if spec is not None and spec.replicas is not None else 1
         ready = st.available_replicas if kind == "Deployment" else st.ready_replicas
         return (st.updated_replicas or 0) >= want and (ready or 0) >= want
 
@@ -448,7 +466,7 @@ class RolloutTrigger:
                 _log.warning("[rollout] unsupported workload kind %s for %s/%s",
                              kind, namespace, name)
                 return
-        except ApiException as exc:
+        except Exception as exc:  # noqa: BLE001 — ApiException and transport errors alike
             status = getattr(exc, "status", None)
             if status == 404:
                 # Workload deleted between schedule and PATCH. Drop the
