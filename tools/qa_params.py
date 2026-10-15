@@ -94,6 +94,7 @@ Run:
 #   section_public_readiness_code_fixes            Public-readiness code fixes — dead fn, paste artifact, dedup, content-
 #   section_public_readiness_chart_fixes           Public-readiness chart fixes — labels, NOTES, pdb, seccomp, replicas,
 #   section_health_gate                            Sample-quality gates — crash-loop health + data sufficiency
+#   section_grow_shrink_baseline_always_fetched   growOnly / shrinkOnly baseline — live CR state fetched unconditionally
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -10919,6 +10920,104 @@ def section_health_gate() -> None:
                key in result.stdout, True)
 
 
+def section_grow_shrink_baseline_always_fetched() -> None:
+    """growOnly / shrinkOnly need the live CR as their baseline. The sync used
+    to fetch that state only when OOM detection or the health gate was on, so
+    with both disabled the clamp silently became a no-op. The fetch (and the
+    read RBAC it needs) must not depend on either feature.
+    """
+    _section("growOnly / shrinkOnly baseline — live CR state fetched unconditionally")
+
+    import argparse as _argparse
+    import main as _main
+    from src.config import Config as _Config, CrWritebackConfig as _CRW, ResourceConfig as _RC
+    from src.discovery import NamespaceTarget as _NsT
+    from src.workload import (
+        ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec,
+    )
+
+    rc = _RC()
+    rc.oom_detection_enabled = False
+    rc.health_gate_enabled = False
+    cfg = _Config(
+        gitlab_url="", gitlab_token="", gitlab_username="",
+        git_author_name="kru", git_author_email="kru@example",
+        dry_run=False, create_mr=False,
+        min_cpu_limit_m=0, min_memory_limit_mi=0,
+        prometheus_url="http://prom:9090", resource=rc,
+        cr_writeback=_CRW(repo_url="https://x/repo.git", path="overrides"),
+        grow_only=True,
+    )
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment",
+                target_name="api", containers=[_CRec(container_name="app")])
+    live = {("ns", "api"): {"containers": {"app": {"requests": {"cpu": "500m"},
+                                                    "limits": {"cpu": "1000m"}}}}}
+    captured: dict = {}
+
+    def _fake_write_back(**kw):
+        captured.update(kw)
+        return None
+
+    with patch("main.Config") as mock_cfg_cls, \
+         patch("main._log_module.setup"), \
+         patch("main.load_config"), \
+         patch("main.log_git_credentials_state"), \
+         patch("main.list_enabled_namespaces",
+               return_value=[_NsT(name="ns", annotations={})]), \
+         patch("main.list_workloads", return_value=[rec]), \
+         patch("main.client"), \
+         patch("main.build_provider"), \
+         patch("src.writeback_webhook.fetch_oom_state", return_value=live) as fetch, \
+         patch("main.write_back_webhook_all", side_effect=_fake_write_back):
+        mock_cfg_cls.load.return_value = cfg
+        _main.cmd_sync(_argparse.Namespace(mr=None))
+
+    _check("[baseline] live CR state fetched with OOM detection AND health gate off",
+           fetch.called, True)
+    _check("[baseline] write-back receives the live CR containers as the grow/shrink baseline",
+           (captured.get("oom_state_lookup") or {}).get(("ns", "api"), {}).get("containers"),
+           live[("ns", "api")]["containers"])
+
+    # The clamp itself, end to end through _build_containers_payload with
+    # both features off: the recommendation below the live value is held.
+    from types import SimpleNamespace
+    from src.writeback_webhook import _build_containers_payload
+    low = SimpleNamespace(cpu_request_m=100, memory_request_bytes=None,
+                          cpu_limit_m=200, memory_limit_bytes=None)
+    with patch("src.writeback_webhook._query_prom_values", return_value=low):
+        payload, _a, _h = _build_containers_payload(
+            rec, cfg, oom_state=live[("ns", "api")], oom_events={},
+            oom_eligible=False, health_gate_enabled=False,
+        )
+    _check("[baseline] growOnly holds the CPU request at the live value",
+           payload[0]["requests"]["cpu"], "500m")
+
+    # Chart: the CronJob ClusterRole must keep get/list on resourceoverrides
+    # when OOM detection is off — otherwise the fetch above gets a 403.
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    chart_dir = _chart_dir()
+    if not helm or not os.path.isdir(chart_dir):
+        print(f"  [{_SKIP}] helm CLI or chart dir unavailable — skipping RBAC render")
+        return
+    res = subprocess.run(
+        [helm, "template", "kru", chart_dir,
+         "--set", "config.crWriteback.repoUrl=https://example/repo.git",
+         "--set", "config.crWriteback.path=overrides",
+         "--set", "config.prometheusUrl=http://qa-prom:9090",
+         "--set", "git.token=qa-fake-token",
+         "--set", "config.oomDetectionEnabled=false",
+         "--show-only", "templates/clusterrole.yaml"],
+        capture_output=True, text=True,
+    )
+    if res.returncode != 0:
+        print(f"  [{_SKIP}] helm render failed: {res.stderr.strip()[:200]}")
+        return
+    _check("[baseline-rbac] resourceoverrides get/list granted with oomDetectionEnabled=false",
+           "resourceoverrides" in res.stdout, True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -11271,6 +11370,7 @@ def main() -> int:
     section_public_readiness_code_fixes()
     section_public_readiness_chart_fixes()
     section_health_gate()
+    section_grow_shrink_baseline_always_fetched()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

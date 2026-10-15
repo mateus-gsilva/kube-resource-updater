@@ -52,15 +52,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
-  # Reads existing ResourceOverrides at sync time to pick up the
-  # `oom-floor.<container>` annotation each carries (slow-path
-  # respects the floor as a memory minimum on subsequent
-  # recommendations). Read-only; CR writes go through git, never
-  # the apiserver. Verb dropped automatically when OOM-aware is off.
+  {{- end }}
+  # Reads existing ResourceOverrides at sync time. The live CR is the
+  # baseline for growOnly / shrinkOnly, the health-gate hold, OOM dedupe
+  # and floors, so the read is unconditional — not tied to OOM detection.
   - apiGroups: ["kube-resource-updater.io"]
     resources: ["resourceoverrides"]
     verbs: ["get", "list"]
-  {{- end }}
   {{- /*
   Discovery-mode reads (endpoints in `default`, services + Prometheus CR
   in `monitoring`) moved to namespace-scoped Roles in `templates/discovery-rbac.yaml` Pre-1.20.0 they were granted cluster-wide here; the

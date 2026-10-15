@@ -353,9 +353,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
         # 4a. Sample-quality gates. Resolved per workload through the same
         # hierarchy as the OOM knobs. When the gate holds a workload, the
-        # write-back layer re-emits the values already committed to its CR,
-        # so the live CR state has to be on hand even when OOM-aware is off
-        # — hence the fetch below is gated on either feature.
+        # write-back layer re-emits the values already committed to its CR.
         from src.overrides import is_health_gate_enabled
         health_gate_lookup = {
             (rec.namespace, rec.target_name): is_health_gate_enabled(
@@ -366,10 +364,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
             for rec, _ in pairs
         }
 
-        if cfg.resource.oom_detection_enabled or any(health_gate_lookup.values()):
-            from src.writeback_webhook import fetch_oom_state
-            co_api = client.CustomObjectsApi()
-            oom_state_lookup = fetch_oom_state(co_api, opt_in_namespaces)
+        # The live CR state is the baseline for every policy that compares a
+        # new recommendation against what pods are admitted with today:
+        # growOnly / shrinkOnly, the health-gate hold, OOM dedupe and floors.
+        # Fetched unconditionally — gating it on OOM detection or the health
+        # gate turned growOnly / shrinkOnly into a silent no-op whenever both
+        # of those were disabled.
+        from src.writeback_webhook import fetch_oom_state
+        co_api = client.CustomObjectsApi()
+        oom_state_lookup = fetch_oom_state(co_api, opt_in_namespaces)
 
         if cfg.resource.oom_detection_enabled:
             from src.writeback_webhook import detect_oom_events
