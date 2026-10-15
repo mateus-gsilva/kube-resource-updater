@@ -166,6 +166,16 @@ def _check_truthy(label: str, got) -> None:
     _check(label, bool(got), True)
 
 
+def _no_health_gate():
+    """Patch the sample-quality gates to "not held" for tests that exercise
+    unrelated build-phase behaviour with a placeholder Prometheus URL. The
+    crash-loop gate fails closed on a missing restart signal, so an
+    unreachable placeholder would otherwise hold every container.
+    """
+    from src.health import NOT_HELD
+    return patch("src.writeback_webhook.assess_container", return_value=NOT_HELD)
+
+
 def _section(title: str) -> None:
     print()
     print("=" * 80)
@@ -5437,7 +5447,7 @@ def section_create_mr_bucketing() -> None:
         cr_writeback=_CW(repo_url="x", path="overrides"),
     )
     from unittest.mock import patch as _patch
-    with _patch("src.writeback_webhook._query_prom_values",
+    with _no_health_gate(), _patch("src.writeback_webhook._query_prom_values",
                 return_value=type("P", (), {
                     "cpu_request_m": 200, "memory_request_bytes": 100*1024*1024,
                     "cpu_limit_m": 400, "memory_limit_bytes": 300*1024*1024,
@@ -5459,7 +5469,7 @@ def section_create_mr_bucketing() -> None:
         target_kind="StatefulSet", target_name=long_name,
         containers=[_CRec(container_name="app")],
     )
-    with _patch("src.writeback_webhook._query_prom_values",
+    with _no_health_gate(), _patch("src.writeback_webhook._query_prom_values",
                 return_value=type("P", (), {
                     "cpu_request_m": 200, "memory_request_bytes": 100*1024*1024,
                     "cpu_limit_m": 400, "memory_limit_bytes": 300*1024*1024,
@@ -5639,7 +5649,7 @@ def section_dry_run_bucketing() -> None:
     mock_prom = type("P", (), {
         "cpu_request_m": 200, "memory_request_bytes": 100 * 1024 * 1024,
         "cpu_limit_m": 400, "memory_limit_bytes": 300 * 1024 * 1024})()
-    with _patch("src.writeback_webhook._query_prom_values", return_value=mock_prom):
+    with _no_health_gate(), _patch("src.writeback_webhook._query_prom_values", return_value=mock_prom):
         entries, _held = _build_entries([(rec_a, _cfg(True)), (rec_b, _cfg(False))])
     api_e = next((e for e in entries if e.cr_name == "api"), None)
     worker_e = next((e for e in entries if e.cr_name == "worker"), None)
@@ -6117,7 +6127,7 @@ def section_cr_name_collision() -> None:
         (_rec("Deployment", "api"), _cfg()),
         (_rec("StatefulSet", "worker"), _cfg()),
     ]
-    with patch("src.writeback_webhook._query_prom_values", return_value=prom):
+    with _no_health_gate(), patch("src.writeback_webhook._query_prom_values", return_value=prom):
         entries, _held = _build_entries(pairs_clean)
     cr_names = sorted(e.cr_name for e in entries)
     _check("[collision-clean] no collision → bare names preserved",
@@ -6128,7 +6138,7 @@ def section_cr_name_collision() -> None:
         (_rec("Deployment", "shared"), _cfg()),
         (_rec("StatefulSet", "shared"), _cfg()),
     ]
-    with patch("src.writeback_webhook._query_prom_values", return_value=prom):
+    with _no_health_gate(), patch("src.writeback_webhook._query_prom_values", return_value=prom):
         entries, _held = _build_entries(pairs_collide)
     cr_names = sorted(e.cr_name for e in entries)
     _check("[collision] both renamed with kind prefix",
@@ -6143,7 +6153,7 @@ def section_cr_name_collision() -> None:
         (_rec("StatefulSet", "shared"), _cfg()),
         (_rec("StatefulSet", "queue"), _cfg()),
     ]
-    with patch("src.writeback_webhook._query_prom_values", return_value=prom):
+    with _no_health_gate(), patch("src.writeback_webhook._query_prom_values", return_value=prom):
         entries, _held = _build_entries(pairs_mixed)
     cr_names = sorted(e.cr_name for e in entries)
     _check("[collision-mixed] non-colliders keep bare name, colliders prefixed",
@@ -6154,7 +6164,7 @@ def section_cr_name_collision() -> None:
         (_rec("Deployment", "shared", ns="ns-a"), _cfg()),
         (_rec("StatefulSet", "shared", ns="ns-b"), _cfg()),
     ]
-    with patch("src.writeback_webhook._query_prom_values", return_value=prom):
+    with _no_health_gate(), patch("src.writeback_webhook._query_prom_values", return_value=prom):
         entries, _held = _build_entries(pairs_xns)
     cr_names = sorted((e.namespace, e.cr_name) for e in entries)
     _check("[collision-xns] same name in different namespaces is NOT a collision",
@@ -10780,9 +10790,23 @@ def section_health_gate() -> None:
     v = _assess(0, 1200, 700)
     _check("[assess] exactly at the 25% coverage threshold → not held", v.held, False)
     v = _assess(None, 4320, 2304)
-    _check("[assess] restart metric absent (no kube-state-metrics) → fail open, "
-           "not held (holding every workload would be the worse regression)",
-           v.held, False)
+    _check("[assess] restart metric absent (no kube-state-metrics) → fail CLOSED: "
+           "held, because the gate cannot tell a crash loop from a healthy pod",
+           v.held, True)
+    from src.health import HOLD_NO_RESTART_SIGNAL
+    _check("[assess] missing-signal hold carries its own reason code",
+           v.reason, HOLD_NO_RESTART_SIGNAL)
+    _check("[assess] missing-signal hold names the metric and the escape hatch",
+           "kube_pod_container_status_restarts_total" in v.detail
+           and "maxRestartsInWindow" in v.detail, True)
+    rc_off = ResourceConfig(max_restarts_in_window=0)
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("src.health.query_restart_count", return_value=None))
+        stack.enter_context(patch("src.health.query_cpu_sample_count", return_value=4320))
+        stack.enter_context(patch("src.health.query_mem_sample_count", return_value=2304))
+        v_off = assess_container("http://p", "n8n", "n8n", "n8n-main", rc_off)
+    _check("[assess] maxRestartsInWindow=0 disables the gate → missing metric not held",
+           v_off.held, False)
     v = _assess(0, None, None)
     _check("[assess] coverage query failed → fail open (the value queries "
            "return None too, and the existing no-Prom-data path handles it)",
@@ -10851,6 +10875,13 @@ def section_health_gate() -> None:
            payload_new, [])
     _check("[hold] omitted container is still reported as held",
            sorted(held_new), ["n8n"])
+
+    # Missing restart signal holds through the same path: committed values kept.
+    payload_nosig, _a, held_nosig = _build(None, 4320, 2304, live_state)
+    _check("[hold] restart metric absent → committed values preserved, not recomputed",
+           payload_nosig[0]["requests"]["cpu"] if payload_nosig else "MISSING", "2000m")
+    _check("[hold] restart metric absent → container reported as held",
+           sorted(held_nosig), ["n8n"])
 
     # Thin data holds through the same path.
     payload_thin, _a, held_thin = _build(0, 30, 2304, live_state)

@@ -264,9 +264,11 @@ config:
   ## `[health-hold]` and listed in the MR description.
   ##
   ## The crash-loop gate reads `kube_pod_container_status_restarts_total`,
-  ## so it needs kube-state-metrics. Without it the gate is inert and logs a
-  ## warning once per sync — it fails open rather than freezing every
-  ## workload in the cluster.
+  ## so it needs kube-state-metrics. Without it the gate fails CLOSED: it
+  ## cannot tell a crash loop from a healthy pod, so every container keeps
+  ## its committed values (held with reason `no-restart-signal`) and a
+  ## warning is logged. Set `maxRestartsInWindow: 0` to size without the
+  ## crash-loop check on clusters that do not run kube-state-metrics.
   ##
   ## Per-workload override via the standard hierarchy
   ## (workload > namespace > helm-default):
