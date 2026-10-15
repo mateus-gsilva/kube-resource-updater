@@ -102,6 +102,7 @@ Run:
 #   section_cronjob_suspend                        cronjob.suspend — kill switch
 #   section_rollout_replay_and_concurrency         autoRollout — replay suppression + concurrency limit
 #   section_git_push_rejection                     gitops push rejection — rebase + retry once, clean failure otherwise
+#   section_mr_work_branch                         config.mr.workBranch — configurable MR source branch
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12072,6 +12073,65 @@ def section_git_push_rejection() -> None:
     _check("[push] cmd_sync returns 1 on a push failure instead of raising", rc, 1)
 
 
+def section_mr_work_branch() -> None:
+    """`config.mr.workBranch` — the MR/PR source branch is configurable so
+    several clusters can share one gitops repo without force-pushing over
+    each other's work branch. Default stays `resource-updater/sync`."""
+    _section("config.mr.workBranch — configurable MR source branch")
+
+    import subprocess as _sp
+    import tempfile as _tf
+    from src.config import Config as _Config, MrConfig
+    from src.writeback_webhook import WebhookEntry, _commit_repo
+
+    _check("[default] workBranch unchanged", MrConfig().work_branch, "resource-updater/sync")
+    with _tf.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        fh.write("config:\n  mr:\n    workBranch: kru/cluster-a\n")
+        path = fh.name
+    _check("[config] workBranch read from the ConfigMap",
+           _Config.from_file(path).mr.work_branch, "kru/cluster-a")
+    os.unlink(path)
+
+    def _rejects(branch, target="main"):
+        cfg = _base_config()
+        cfg.prometheus_url = "http://p"
+        cfg.gitlab_token = "t"
+        cfg.cr_writeback.branch = target
+        cfg.mr = MrConfig(work_branch=branch)
+        try:
+            cfg.validate()
+            return False
+        except SystemExit:
+            return True
+    _check("[validate] option-looking workBranch rejected", _rejects("--upload-pack=x"), True)
+    _check("[validate] workBranch equal to the target branch rejected (would force-push it)",
+           _rejects("main"), True)
+    _check("[validate] sane workBranch accepted", _rejects("kru/cluster-a"), False)
+
+    seen: list = []
+
+    def _run(cmd, allow_nonzero=False, timeout=None):
+        seen.append(cmd)
+        return _sp.CompletedProcess(cmd, 1 if "--quiet" in cmd else 0, "", "")
+
+    provider = MagicMock()
+    provider.has_credentials.return_value = True
+    provider.auth_url.side_effect = lambda u: u
+    provider.resolve_users.return_value = []
+    provider.open_or_update_pr.return_value = "https://git.example/r/-/merge_requests/1"
+    e = WebhookEntry(namespace="ns", cr_name="api", selector_labels={"app": "api"},
+                     containers=[{"name": "app", "requests": {"cpu": "100m"}}], create_mr=True)
+    with patch("src.writeback_webhook._run", side_effect=_run):
+        _commit_repo(repo_url="https://git.example/r.git", branch="main", path="o",
+                     entries=[e], provider=provider, git_author_name="k",
+                     git_author_email="k@e", mr_config=MrConfig(work_branch="kru/cluster-a"))
+    checkout = [c for c in seen if "checkout" in c]
+    _check("[mr] work branch checked out from the configured name",
+           bool(checkout) and checkout[0][-2], "kru/cluster-a")
+    _check("[mr] MR opened from the configured branch",
+           provider.open_or_update_pr.call_args.kwargs.get("source_branch"), "kru/cluster-a")
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12432,6 +12492,7 @@ def main() -> int:
     section_cronjob_suspend()
     section_rollout_replay_and_concurrency()
     section_git_push_rejection()
+    section_mr_work_branch()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

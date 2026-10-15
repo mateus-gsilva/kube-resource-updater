@@ -2493,7 +2493,7 @@ def _commit_repo(
                 # Refresh our working copy so the MR branch forks from the
                 # updated tip of `branch`, not the pre-push HEAD.
                 _run(["git", "-C", repo_dir, "fetch", "origin", branch])
-            work_branch = "resource-updater/sync"
+            work_branch = (mr_config.work_branch if mr_config else "") or "resource-updater/sync"
             _run(["git", "-C", repo_dir, "checkout", "-B", work_branch, f"origin/{branch}"])
 
             changed = _write_namespace_files(

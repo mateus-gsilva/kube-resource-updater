@@ -121,7 +121,8 @@
             "reviewers": { "type": "string" },
             "labels": { "type": "string" },
             "squash": { "type": ["boolean", "string"] },
-            "removeSourceBranch": { "type": ["boolean", "string"] }
+            "removeSourceBranch": { "type": ["boolean", "string"] },
+            "workBranch": { "type": "string" }
           }
         }
       }

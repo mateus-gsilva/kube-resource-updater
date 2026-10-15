@@ -414,6 +414,8 @@ config:
     squash: false
     ## @param config.mr.removeSourceBranch Delete source branch after merge (kept true for the historical default)
     removeSourceBranch: true
+    ## @param config.mr.workBranch Source branch the tool force-pushes and opens the MR/PR from. Use one per cluster when several clusters share one gitops repo. Must differ from crWriteback.branch.
+    workBranch: "resource-updater/sync"
 
 ## @section Git credentials
 ##

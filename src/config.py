@@ -290,6 +290,9 @@ class MrConfig:
     labels: list[str] = field(default_factory=list)
     squash: bool = False
     remove_source_branch: bool = True
+    # Source branch the tool force-pushes and opens the MR/PR from. Give each
+    # cluster its own when several share one gitops repo.
+    work_branch: str = "resource-updater/sync"
 
 
 @dataclass
@@ -633,6 +636,21 @@ class Config:
                 f"which would let a hand-edited ConfigMap inject git options."
             )
 
+        wb = self.mr.work_branch
+        if gitops and (
+            not wb or not branch_re.match(wb) or wb.startswith("-")
+            or wb.startswith("/") or ".." in wb
+        ):
+            errors.append(
+                f"config.mr.workBranch = {wb!r} is not a safe git ref (same rules as "
+                f"config.crWriteback.branch)."
+            )
+        elif gitops and wb == (b or "main"):
+            errors.append(
+                f"config.mr.workBranch = {wb!r} equals config.crWriteback.branch — the "
+                f"tool force-pushes its work branch, which would overwrite the target branch."
+            )
+
         # gitlab_username: empty is the documented default (oauth2 fallback
         # in _auth_url). Non-empty must match GitLab's
         # username grammar — starts alphanumeric, then alphanumeric / '.'
@@ -760,6 +778,7 @@ class Config:
                 labels=_parse_csv(mr_raw.get("labels", "")),
                 squash=_bool(mr_raw.get("squash", False)),
                 remove_source_branch=_bool(mr_raw.get("removeSourceBranch", True), default=True),
+                work_branch=str(mr_raw.get("workBranch", "") or "").strip() or "resource-updater/sync",
             ),
             grow_only=_bool(cfg.get("growOnly", False)),
             shrink_only=_bool(cfg.get("shrinkOnly", False)),
@@ -828,6 +847,7 @@ class Config:
                 labels=_parse_csv(os.environ.get("MR_LABELS", "")),
                 squash=os.environ.get("MR_SQUASH", "false").lower() in ("1", "true", "yes"),
                 remove_source_branch=os.environ.get("MR_REMOVE_SOURCE_BRANCH", "true").lower() in ("1", "true", "yes"),
+                work_branch=os.environ.get("MR_WORK_BRANCH", "").strip() or "resource-updater/sync",
             ),
             grow_only=os.environ.get("GROW_ONLY", "false").lower() in ("1", "true", "yes"),
             shrink_only=os.environ.get("SHRINK_ONLY", "false").lower() in ("1", "true", "yes"),
