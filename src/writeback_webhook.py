@@ -19,6 +19,7 @@ All file/git plumbing is shared with src/writeback.py via helper imports.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -67,6 +68,67 @@ CR_FILE_SUFFIX = ".resource-override.yaml"
 # webhook server's expectations (src/webhook_cache.py).
 CR_API_VERSION = "kube-resource-updater.io/v1"
 CR_KIND = "ResourceOverride"
+
+
+# Change-audit annotations, written on the CR every time its container
+# resources change: when (RFC3339) and what they were before (compact JSON,
+# `{container: {"requests": {...}, "limits": {...}}}`). The cooldown reads
+# `last-changed` back from the live CR.
+LAST_CHANGED_ANNOTATION = "kube-resource-updater.io/last-changed"
+PREVIOUS_RESOURCES_ANNOTATION = "kube-resource-updater.io/previous-resources"
+
+
+def _utcnow() -> datetime:
+    """Current UTC time — one seam so tests can pin the clock."""
+    return datetime.now(timezone.utc)
+
+
+def _rfc3339(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_rfc3339(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _containers_index(containers) -> dict[str, dict]:
+    """Normalise a CR `containers` list to `{name: {"requests", "limits"}}`
+    with string values and empty sections dropped — the comparison and the
+    previous-resources serialisation both use this shape."""
+    out: dict[str, dict] = {}
+    for c in containers or []:
+        if not isinstance(c, dict) or not c.get("name"):
+            continue
+        entry: dict = {}
+        for section in ("requests", "limits"):
+            vals = {str(k): str(v) for k, v in (c.get(section) or {}).items()}
+            if vals:
+                entry[section] = vals
+        out[str(c["name"])] = entry
+    return out
+
+
+def _compact_resources_json(containers) -> str:
+    return json.dumps(_containers_index(containers), separators=(",", ":"), sort_keys=True)
+
+
+def _stamp_change_audit(annotations: dict, new_containers, old_containers, *, existed: bool) -> bool:
+    """Update `annotations` in place when the resources changed. Returns True
+    on a change. Unchanged → annotations are left exactly as carried."""
+    if existed and _containers_index(new_containers) == _containers_index(old_containers):
+        return False
+    annotations[LAST_CHANGED_ANNOTATION] = _rfc3339(_utcnow())
+    if existed:
+        annotations[PREVIOUS_RESOURCES_ANNOTATION] = _compact_resources_json(old_containers)
+    else:
+        annotations.pop(PREVIOUS_RESOURCES_ANNOTATION, None)
+    return True
 
 
 # MR description size cap (bytes). GitLab rejects descriptions > 1 MiB with
@@ -964,23 +1026,50 @@ def _build_containers_payload(
     out_history = dict(prior_history)
     out_investigation = dict(prior_investigation)
 
+    # Cooldown: a workload whose CR changed less than `cooldown_hours` ago
+    # keeps its current values; only OOM-driven changes still apply (the
+    # bump below runs on top of the preserved values).
+    in_cooldown = False
+    if rc.cooldown_hours > 0:
+        last_changed = _parse_rfc3339(
+            ((oom_state or {}).get("annotations") or {}).get(LAST_CHANGED_ANNOTATION))
+        if last_changed is not None:
+            age_h = (_utcnow() - last_changed).total_seconds() / 3600
+            in_cooldown = age_h < rc.cooldown_hours
+            if in_cooldown:
+                _log.info(
+                    "  [cooldown] %s/%s: last changed %s (%.1fh ago, cooldown %gh) — "
+                    "keeping current values; only OOM-driven changes apply",
+                    rec.namespace, rec.target_name, _rfc3339(last_changed),
+                    age_h, rc.cooldown_hours,
+                )
+
     payload: list[dict] = []
     held: dict[str, str] = {}
     for c in kept:
+        cooled = prev_res_lookup.get(c.container_name) if in_cooldown else None
         # ── (0) Sample-quality gates ──────────────────────────────────────
         # Runs BEFORE the value queries. A percentile computed from a
         # crash-looping pod's failed-startup bursts, or from a handful of
         # samples, is not a recommendation — it's noise that the admission
         # webhook would then re-apply on every restart without ever
         # recomputing, so an undersized CR keeps the workload restarting
-        # and keeps the samples bad.
+        # and keeps the samples bad. Skipped in cooldown: nothing is
+        # recomputed from the window there.
         verdict = (
             assess_container(cfg.prometheus_url, rec.namespace, c.container_name,
                              rec.target_name, rc)
-            if health_gate_enabled and cfg.prometheus_url
+            if health_gate_enabled and cfg.prometheus_url and not cooled
             else NOT_HELD
         )
-        if verdict.held:
+        if cooled:
+            # Cooldown: start from the values pods run with today. Steps
+            # (2)-(5) still run, so a fresh OOM bumps memory on top.
+            res = {
+                "requests": dict(cooled.get("requests") or {}),
+                "limits": dict(cooled.get("limits") or {}),
+            }
+        elif verdict.held:
             held[c.container_name] = verdict.detail
             # PRESERVE, don't prune. Dropping the container here (and with
             # it, possibly the whole entry) would remove the CR doc from the
@@ -1815,6 +1904,14 @@ def _render_cr_doc(e: WebhookEntry, prev_doc: dict | None = None) -> dict:
     # prev state already, so this is the canonical post-merge view.
     if e.oom_annotations:
         annotations.update(e.oom_annotations)
+
+    # Change audit: refreshed only when the container resources differ from
+    # the previously committed doc, so a no-op sync renders identical bytes.
+    _stamp_change_audit(
+        annotations, e.containers,
+        ((prev_doc or {}).get("spec") or {}).get("containers"),
+        existed=prev_doc is not None,
+    )
 
     # Tool-owned label always present.
     labels["app.kubernetes.io/managed-by"] = "kube-resource-updater"

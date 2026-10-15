@@ -94,6 +94,7 @@
         "shrinkOnly": { "type": ["boolean", "string"] },
         "emitCpuLimits": { "type": ["boolean", "string"] },
         "maxChangePercent": { "type": ["string", "number"] },
+        "cooldownHours": { "type": ["string", "number"] },
         "oomDetectionEnabled": { "type": ["boolean", "string"] },
         "oomBumpFactor": { "type": ["string", "number"] },
         "oomFloorEnabled": { "type": ["boolean", "string"] },

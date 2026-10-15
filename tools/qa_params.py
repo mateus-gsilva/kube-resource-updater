@@ -97,6 +97,7 @@ Run:
 #   section_grow_shrink_baseline_always_fetched   growOnly / shrinkOnly baseline — live CR state fetched unconditionally
 #   section_emit_cpu_limits                        emitCpuLimits — no limits.cpu in the CR when disabled
 #   section_max_change_cap                         maxChangePercent — per-sync change cap with OOM exemption
+#   section_change_audit_and_cooldown             Change audit annotations + cooldownHours
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -11303,6 +11304,135 @@ def section_max_change_cap() -> None:
            tr, {"requests": {"cpu": "250m", "memory": "128Mi"}, "limits": {"memory": "256Mi"}})
 
 
+def section_change_audit_and_cooldown() -> None:
+    """Audit annotations on every change + `config.cooldownHours`.
+
+    Every time a CR's container resources change, the rendered CR records
+    `kube-resource-updater.io/last-changed` (RFC3339) and
+    `kube-resource-updater.io/previous-resources` (compact JSON of the prior
+    per-container requests/limits). Unchanged CRs carry both forward
+    verbatim, so files stay byte-stable across no-op syncs.
+
+    The cooldown reads `last-changed` from the LIVE CR: younger than N hours
+    → non-OOM changes are skipped (current values kept); a fresh OOM still
+    bumps memory.
+    """
+    _section("Change audit annotations + cooldownHours")
+
+    import datetime as _dt
+    import json as _json
+    from types import SimpleNamespace
+    from src.config import ResourceConfig as _RC
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    from src.writeback_webhook import (
+        LAST_CHANGED_ANNOTATION, PREVIOUS_RESOURCES_ANNOTATION, OomEvent, WebhookEntry,
+        _build_containers_payload, _render_cr_doc,
+    )
+
+    P = "kube-resource-updater."
+    M = 1024 * 1024
+    _check("[keys] last-changed annotation key",
+           LAST_CHANGED_ANNOTATION, "kube-resource-updater.io/last-changed")
+    _check("[keys] previous-resources annotation key",
+           PREVIOUS_RESOURCES_ANNOTATION, "kube-resource-updater.io/previous-resources")
+    _check("[default] cooldownHours = 0 (disabled)", _RC().cooldown_hours, 0.0)
+    _check("[config] cooldownHours parsed", _RC.from_dict({"cooldownHours": "12"}).cooldown_hours, 12.0)
+    _check("[hier] namespace annotation sets cooldownHours",
+           resolve_for_workload(_base_config(), {P + "cooldownHours": "24"}, {}).resource.cooldown_hours,
+           24.0)
+    bad = _base_config()
+    bad.resource.cooldown_hours = -1
+    try:
+        bad.validate()
+        rejected = False
+    except SystemExit:
+        rejected = True
+    _check("[validate] negative cooldownHours rejected", rejected, True)
+
+    now = _dt.datetime(2026, 10, 15, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    new_c = [{"name": "app", "requests": {"cpu": "200m"}, "limits": {"memory": "256Mi"}}]
+    old_c = [{"name": "app", "requests": {"cpu": "100m"}, "limits": {"memory": "128Mi"}}]
+    e = WebhookEntry(namespace="ns", cr_name="api", selector_labels={"app": "api"},
+                     containers=new_c)
+
+    def _prev(containers, anns=None):
+        return {"apiVersion": "kube-resource-updater.io/v1", "kind": "ResourceOverride",
+                "metadata": {"name": "api", "namespace": "ns",
+                             "labels": {"app.kubernetes.io/managed-by": "kube-resource-updater"},
+                             "annotations": dict(anns or {})},
+                "spec": {"selector": {"matchLabels": {"app": "api"}}, "containers": containers}}
+
+    with patch("src.writeback_webhook._utcnow", return_value=now):
+        doc_new = _render_cr_doc(e, None)
+        doc_chg = _render_cr_doc(e, _prev(old_c, {LAST_CHANGED_ANNOTATION: "2026-01-01T00:00:00Z"}))
+        doc_same = _render_cr_doc(e, _prev(new_c, {
+            LAST_CHANGED_ANNOTATION: "2026-01-01T00:00:00Z",
+            PREVIOUS_RESOURCES_ANNOTATION: '{"app":{}}'}))
+    a_new = doc_new["metadata"].get("annotations") or {}
+    a_chg = doc_chg["metadata"].get("annotations") or {}
+    a_same = doc_same["metadata"].get("annotations") or {}
+    _check("[audit] first render stamps last-changed", a_new.get(LAST_CHANGED_ANNOTATION),
+           "2026-10-15T12:00:00Z")
+    _check("[audit] first render has no previous-resources (nothing before it)",
+           PREVIOUS_RESOURCES_ANNOTATION in a_new, False)
+    _check("[audit] changed resources → last-changed refreshed",
+           a_chg.get(LAST_CHANGED_ANNOTATION), "2026-10-15T12:00:00Z")
+    _check("[audit] changed resources → previous-resources holds the prior values (compact JSON)",
+           a_chg.get(PREVIOUS_RESOURCES_ANNOTATION),
+           _json.dumps({"app": {"requests": {"cpu": "100m"}, "limits": {"memory": "128Mi"}}},
+                       separators=(",", ":"), sort_keys=True))
+    _check("[audit] unchanged resources → last-changed carried forward (byte-stable file)",
+           a_same.get(LAST_CHANGED_ANNOTATION), "2026-01-01T00:00:00Z")
+    _check("[audit] unchanged resources → previous-resources carried forward",
+           a_same.get(PREVIOUS_RESOURCES_ANNOTATION), '{"app":{}}')
+
+    # ── Cooldown ────────────────────────────────────────────────────────
+    prom = SimpleNamespace(cpu_request_m=900, memory_request_bytes=512 * M,
+                           cpu_limit_m=1800, memory_limit_bytes=1024 * M)
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                containers=[_CRec(container_name="app")])
+    current = {"requests": {"cpu": "100m", "memory": "128Mi"},
+               "limits": {"cpu": "400m", "memory": "256Mi"}}
+
+    def _state(hours_ago):
+        ts = (now - _dt.timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"annotations": {LAST_CHANGED_ANNOTATION: ts},
+                "containers": {"app": {"requests": dict(current["requests"]),
+                                       "limits": dict(current["limits"])}}}
+
+    def _build(cooldown, state, events=None):
+        cfg = _base_config()
+        cfg.prometheus_url = "http://prom:9090"
+        cfg.resource.cooldown_hours = cooldown
+        cfg.resource.oom_bump_factor = 2.0
+        with _no_health_gate(), \
+             patch("src.writeback_webhook._utcnow", return_value=now), \
+             patch("src.writeback_webhook._query_prom_values", return_value=prom) as q:
+            payload, _a, _h = _build_containers_payload(
+                rec, cfg, oom_state=state, oom_events=events or {},
+                oom_eligible=True, health_gate_enabled=True,
+            )
+        return (payload[0] if payload else {}), q.called
+
+    out, queried = _build(6, _state(1))
+    _check("[cooldown] changed 1h ago, cooldown 6h → current values kept",
+           {"requests": out.get("requests"), "limits": out.get("limits")}, current)
+    _check("[cooldown] in cooldown → Prometheus not even queried", queried, False)
+    out, _q = _build(6, _state(7))
+    _check("[cooldown] changed 7h ago, cooldown 6h → recomputed", out["requests"]["cpu"], "900m")
+    out, _q = _build(0, _state(1))
+    _check("[cooldown] cooldownHours=0 → disabled, recomputed", out["requests"]["cpu"], "900m")
+    out, _q = _build(6, {"containers": _state(1)["containers"]})
+    _check("[cooldown] CR without last-changed → not in cooldown", out["requests"]["cpu"], "900m")
+    ev = OomEvent(namespace="ns", workload_name="api", container="app",
+                  finished_at="2026-10-15T11:30:00Z", trap_limit_bytes=256 * M)
+    out, _q = _build(6, _state(1), events={"app": ev})
+    _check("[cooldown] fresh OOM inside the cooldown still bumps memory",
+           out["limits"]["memory"], "512Mi")
+    _check("[cooldown] fresh OOM inside the cooldown leaves CPU at the current value",
+           out["requests"]["cpu"], "100m")
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -11658,6 +11788,7 @@ def main() -> int:
     section_grow_shrink_baseline_always_fetched()
     section_emit_cpu_limits()
     section_max_change_cap()
+    section_change_audit_and_cooldown()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

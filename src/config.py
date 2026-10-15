@@ -155,6 +155,9 @@ class ResourceConfig:
     # current baseline (live CR value; else the pod-template value; else no
     # clamp). 0 disables. OOM-driven memory increases are exempt upward.
     max_change_percent: float = 0.0
+    # Minimum hours between two non-OOM changes of one workload's CR,
+    # measured from the CR's `last-changed` annotation. 0 disables.
+    cooldown_hours: float = 0.0
 
     @property
     def effective_cpu_request_margin(self) -> float:
@@ -226,6 +229,7 @@ class ResourceConfig:
             min_sample_coverage=float(d.get("minSampleCoverage", "0.25")),
             emit_cpu_limits=_bool(d.get("emitCpuLimits", True), default=True),
             max_change_percent=float(d.get("maxChangePercent", 0) or 0),
+            cooldown_hours=float(d.get("cooldownHours", 0) or 0),
         )
 
     @classmethod
@@ -263,6 +267,7 @@ class ResourceConfig:
             min_sample_coverage=float(os.environ.get("MIN_SAMPLE_COVERAGE", "0.25")),
             emit_cpu_limits=os.environ.get("EMIT_CPU_LIMITS", "true").lower() in ("1", "true", "yes"),
             max_change_percent=float(os.environ.get("MAX_CHANGE_PERCENT", "0") or 0),
+            cooldown_hours=float(os.environ.get("COOLDOWN_HOURS", "0") or 0),
         )
 
 
@@ -444,6 +449,12 @@ class Config:
             errors.append(
                 f"config.maxChangePercent = {rc.max_change_percent} is negative — "
                 f"use 0 to disable the per-sync change cap"
+            )
+
+        if rc.cooldown_hours < 0:
+            errors.append(
+                f"config.cooldownHours = {rc.cooldown_hours} is negative — "
+                f"use 0 to disable the cooldown"
             )
 
         # Per-type margins (optional fields; None = inherit marginFraction).

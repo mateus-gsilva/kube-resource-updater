@@ -206,6 +206,15 @@ config:
   ## `kube-resource-updater.maxChangePercent: "25"`.
   ## @param config.maxChangePercent Max % a value may move per sync vs its current value (0 = disabled)
   maxChangePercent: "0"
+  ## Cooldown between changes. A workload whose ResourceOverride changed less
+  ## than this many hours ago keeps its current values; only OOM-driven
+  ## memory bumps still apply. Measured from the CR's
+  ## `kube-resource-updater.io/last-changed` annotation, which every change
+  ## stamps (with `previous-resources` holding the prior values). In gitops
+  ## mode the timestamp is the render time, not the merge time. Per-workload
+  ## override: `kube-resource-updater.cooldownHours: "24"`.
+  ## @param config.cooldownHours Minimum hours between non-OOM changes of one workload (0 = disabled)
+  cooldownHours: "0"
 
   ## OOM-aware. Detects `OOMKilled` events on opted-in
   ## workloads at sync time (slow-path only — 's webhook
