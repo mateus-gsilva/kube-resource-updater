@@ -44,6 +44,7 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
+        "suspend": { "type": "boolean" },
         "schedule": { "type": "string" },
         "timeZone": { "type": "string" },
         "concurrencyPolicy": { "type": "string", "enum": ["Allow", "Forbid", "Replace"] },

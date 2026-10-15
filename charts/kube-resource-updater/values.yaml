@@ -56,6 +56,8 @@ cronjob:
   ## only need the admission webhook (the webhook is the per-cluster runtime; the CronJob runs
   ## in a single "control" cluster that has access to ArgoCD Applications and the GitLab token).
   enabled: true
+  ## @param cronjob.suspend Kill switch — suspend the sync CronJob (no new runs; the webhook keeps applying existing CRs)
+  suspend: false
   ## @param cronjob.schedule Cron schedule expression
   schedule: "0 */6 * * *"
   ## @param cronjob.timeZone Timezone (requires k8s >= 1.27)

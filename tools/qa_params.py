@@ -99,6 +99,7 @@ Run:
 #   section_max_change_cap                         maxChangePercent — per-sync change cap with OOM exemption
 #   section_change_audit_and_cooldown             Change audit annotations + cooldownHours
 #   section_writeback_direct_mode                  writebackMode=direct — server-side apply + audit + orphan delete
+#   section_cronjob_suspend                        cronjob.suspend — kill switch
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -11765,6 +11766,38 @@ def section_writeback_direct_mode() -> None:
            "writebackMode: direct" in out_cm, True)
 
 
+def section_cronjob_suspend() -> None:
+    """`cronjob.suspend` — kill switch that stops scheduling new syncs without
+    uninstalling (the webhook keeps applying the CRs already in place)."""
+    _section("cronjob.suspend — kill switch")
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    chart_dir = _chart_dir()
+    if not helm or not os.path.isdir(chart_dir):
+        print(f"  [{_SKIP}] helm CLI or chart dir unavailable")
+        return
+
+    def _cj(*sets):
+        cmd = [helm, "template", "kru", chart_dir,
+               "--set", "config.prometheusUrl=http://p:9090",
+               "--set", "config.writebackMode=direct",
+               "--show-only", "templates/cronjob.yaml"]
+        for kv in sets:
+            cmd += ["--set", kv]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    rc, out = _cj()
+    _check("[suspend] default render ok", rc, 0)
+    _check("[suspend] default → spec.suspend: false", "\n  suspend: false\n" in out, True)
+    rc, out = _cj("cronjob.suspend=true")
+    _check("[suspend] cronjob.suspend=true → spec.suspend: true",
+           "\n  suspend: true\n" in out, True)
+    rc, _o = _cj("cronjob.suspend=maybe")
+    _check("[suspend] non-boolean rejected by the schema", rc != 0, True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12122,6 +12155,7 @@ def main() -> int:
     section_max_change_cap()
     section_change_audit_and_cooldown()
     section_writeback_direct_mode()
+    section_cronjob_suspend()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 
