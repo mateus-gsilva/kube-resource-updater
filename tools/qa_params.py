@@ -112,6 +112,7 @@ Run:
 #   section_direct_foreign_ownership              direct mode — foreign spec ownership + tracking-only strip
 #   section_emit_cpu_limits_empty_limits          emitCpuLimits — explicit empty limits remove the pod's CPU limit
 #   section_restart_query_retry                   restart-count query — retry once, distinguish query-error from no-series
+#   section_direct_delete_paths                   direct mode — every delete re-checks managed-by on the object
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12754,6 +12755,28 @@ def section_restart_query_retry() -> None:
     _check("[detail] absent series named in the hold detail", "no data" in v_none.detail, True)
 
 
+def section_direct_delete_paths() -> None:
+    """Direct-mode RBAC is cluster-wide (namespaces opt in dynamically), so
+    every delete path must re-check the managed-by label on the object it is
+    about to delete — the listed object itself, never a cached name."""
+    _section("direct mode — every delete re-checks managed-by on the object")
+    import glob
+    calls = []
+    for f in sorted(glob.glob(os.path.join(os.path.dirname(__file__), "..", "src", "*.py"))):
+        with open(f, encoding="utf-8") as fh:
+            for line in fh:
+                if "delete_namespaced_custom_object(" in line or "delete_cluster_custom_object(" in line:
+                    calls.append(os.path.basename(f))
+    _check("[delete] exactly one CR delete call site (the orphan prune)", calls, ["writeback_webhook.py"])
+    import inspect
+    from src.writeback_webhook import _prune_orphan_crs
+    src_text = inspect.getsource(_prune_orphan_crs)
+    i_label = src_text.find('get(MANAGED_BY_LABEL) != MANAGED_BY_VALUE')
+    i_del = src_text.find("delete_namespaced_custom_object(")
+    _check("[delete] the label check on the listed object precedes the delete",
+           0 <= i_label < i_del, True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -13124,6 +13147,7 @@ def main() -> int:
     section_direct_foreign_ownership()
     section_emit_cpu_limits_empty_limits()
     section_restart_query_retry()
+    section_direct_delete_paths()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

@@ -1261,6 +1261,8 @@ Gated on `config.writebackMode: direct`:
 | `resourceoverrides.kube-resource-updater.io` | `create`, `patch`, `delete` | Server-side apply of each CR; deletion of tool-owned CRs no longer wanted |
 | `events` | `create`, `patch` | `ResourcesUpdated` audit Event per change |
 
+Blast radius: the direct-mode grant is cluster-wide on purpose — namespaces opt in by annotation at any time, so a fixed namespace list would go stale. The sync therefore holds create/patch/delete on every `ResourceOverride` in the cluster, which is the ability to change pod resources anywhere the webhook admits pods. The code narrows what it does with it: the only delete call is the orphan prune, which lists with a `managed-by` label selector and re-checks the label on each listed object before deleting it; namespaces with a discovery, Prometheus or live-CR read failure that sync are left untouched; CRs whose `spec` another field manager owns are never applied or deleted (unless `direct.adoptForeignCRs`).
+
 **No discovery-mode grants**: Prometheus auto-discovery was
 removed along with the three cluster-wide reads it required (`endpoints`,
 `services`, `prometheuses.monitoring.coreos.com`). The operator sets
