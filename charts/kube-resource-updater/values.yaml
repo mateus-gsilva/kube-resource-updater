@@ -106,6 +106,23 @@ args:
 ##     kube-resource-updater.shrinkOnly: "true"
 ##
 config:
+  ## Write-back mode — where rendered ResourceOverrides go.
+  ##
+  ##   gitops (default)  commit CRs to `crWriteback.repoUrl`; a GitOps engine
+  ##                     (Argo CD, Flux) applies them. Review via MR/PR, audit
+  ##                     trail = git history. Needs crWriteback + git creds.
+  ##   direct            server-side apply CRs to the cluster API (field
+  ##                     manager `kube-resource-updater`) and delete the
+  ##                     tool-owned CRs no longer wanted. No git settings
+  ##                     needed; audit trail = `last-changed` /
+  ##                     `previous-resources` annotations + a Kubernetes Event
+  ##                     per change. The CRs must NOT be managed by an Argo CD
+  ##                     Application (or exclude the ResourceOverride kind),
+  ##                     or the two will fight. Grants the sync ClusterRole
+  ##                     create/patch/delete on resourceoverrides + events.
+  ##
+  ## @param config.writebackMode Write-back mode: "gitops" (commit to git) | "direct" (apply to the cluster API)
+  writebackMode: gitops
   ## @param config.gitProvider Git provider override: "" (auto-detect from repoUrl) | "auto" | "gitlab" | "github"
   ## When empty, the tool infers the provider from the repoUrl host (github.com / github.* →
   ## GitHub; everything else → GitLab). Override here to force a specific provider or to wire
@@ -333,7 +350,8 @@ config:
   ## @param config.skipContainers Comma-separated container names to skip cluster-wide
   skipContainers: ""
 
-  ## CR write-back target — REQUIRED. The chart fails to install/upgrade when
+  ## CR write-back target — REQUIRED in gitops mode (ignored when
+  ## `writebackMode: direct`). The chart fails to install/upgrade when
   ## crWriteback.repoUrl or crWriteback.path is empty (Helm `required` template
   ## function in templates/configmap.yaml). The tool re-validates at startup
   ## as defence in depth in case the ConfigMap is hand-edited later.

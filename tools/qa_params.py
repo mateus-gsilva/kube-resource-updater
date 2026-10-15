@@ -98,6 +98,7 @@ Run:
 #   section_emit_cpu_limits                        emitCpuLimits — no limits.cpu in the CR when disabled
 #   section_max_change_cap                         maxChangePercent — per-sync change cap with OOM exemption
 #   section_change_audit_and_cooldown             Change audit annotations + cooldownHours
+#   section_writeback_direct_mode                  writebackMode=direct — server-side apply + audit + orphan delete
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -11433,6 +11434,337 @@ def section_change_audit_and_cooldown() -> None:
            out["requests"]["cpu"], "100m")
 
 
+def section_writeback_direct_mode() -> None:
+    """`config.writebackMode: direct` — server-side apply CRs to the API.
+
+    Covers: config/validation (no git settings required), SSA call shape
+    (field manager, force, apply content type), the apply body carrying only
+    tool-owned metadata, ArgoCD tracking-metadata stripping, audit
+    annotations + Kubernetes Event, unchanged-CR skip, orphan deletion scoped
+    to tool-owned CRs, dryRun, and the chart's conditional RBAC.
+    """
+    _section("writebackMode=direct — server-side apply + audit + orphan delete")
+
+    import argparse as _argparse
+    import datetime as _dt
+    import json as _json
+    import shutil
+    import subprocess
+    from unittest.mock import MagicMock as _MM
+    import main as _main
+    from kubernetes.client.rest import ApiException
+    from src.config import Config as _Config, CrWritebackConfig as _CRW, ResourceConfig as _RC
+    from src.discovery import NamespaceTarget as _NsT
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    from src.writeback_webhook import (
+        FIELD_MANAGER, LAST_CHANGED_ANNOTATION, PREVIOUS_RESOURCES_ANNOTATION,
+        WebhookEntry, _apply_direct, _render_cr_doc, write_back_webhook_all,
+    )
+
+    # ── Config ──────────────────────────────────────────────────────────
+    def _cfg(**kw) -> _Config:
+        base = dict(
+            gitlab_url="", gitlab_token="", gitlab_username="",
+            git_author_name="kru", git_author_email="kru@example",
+            dry_run=False, create_mr=True, min_cpu_limit_m=0, min_memory_limit_mi=0,
+            prometheus_url="http://prom:9090", resource=_RC(),
+            cr_writeback=_CRW(repo_url="", path=""),
+        )
+        base.update(kw)
+        return _Config(**base)
+
+    def _validates(cfg) -> bool:
+        try:
+            cfg.validate()
+            return True
+        except SystemExit:
+            return False
+
+    _check("[config] writebackMode defaults to gitops", _cfg().writeback_mode, "gitops")
+    _check("[config] gitops mode still requires crWriteback + git token",
+           _validates(_cfg()), False)
+    _check("[config] direct mode needs no crWriteback, token or author identity",
+           _validates(_cfg(writeback_mode="direct", git_author_name="", git_author_email="")),
+           True)
+    _check("[config] unknown writebackMode rejected (push-only is not implemented)",
+           _validates(_cfg(writeback_mode="push-only")), False)
+    import tempfile as _tf
+    with _tf.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        fh.write("config:\n  writebackMode: Direct\n  prometheusUrl: http://p\n")
+        cfg_path = fh.name
+    _check("[config] writebackMode read from the ConfigMap (case-insensitive)",
+           _Config.from_file(cfg_path).writeback_mode, "direct")
+    os.unlink(cfg_path)
+
+    # ── Fixtures ────────────────────────────────────────────────────────
+    now = _dt.datetime(2026, 10, 15, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    new_c = [{"name": "app", "requests": {"cpu": "200m", "memory": "256Mi"},
+              "limits": {"memory": "512Mi"}}]
+    old_c = {"app": {"requests": {"cpu": "100m", "memory": "128Mi"},
+                     "limits": {"memory": "256Mi"}}}
+
+    def _entry(name="api", ns="ns", dry=False):
+        return WebhookEntry(namespace=ns, cr_name=name, selector_labels={"app": name},
+                            containers=[dict(c) for c in new_c], dry_run=dry)
+
+    def _live(containers, annotations=None, labels=None, managed=None, selector=None):
+        return {"containers": containers, "annotations": dict(annotations or {}),
+                "labels": dict(labels or {}), "managed_fields": managed or [],
+                "selector": selector or {"app": "api"}, "uid": "uid-1",
+                "resource_version": "7"}
+
+    def _apis(cluster_items=None, apply_result=None):
+        co = _MM()
+        co.api_client.call_api.side_effect = (
+            lambda *a, **k: apply_result if apply_result is not None
+            else {"metadata": {"uid": "uid-new", "resourceVersion": "8"},
+                  "spec": {"containers": k["body"]["spec"]["containers"]}})
+        co.list_cluster_custom_object.return_value = {"items": cluster_items or []}
+        core = _MM()
+        return co, core
+
+    def _run(entries, state, *, dry=False, cluster_items=None, apply_result=None):
+        co, core = _apis(cluster_items, apply_result)
+        with patch("src.writeback_webhook._utcnow", return_value=now):
+            res = _apply_direct(entries, state_lookup=state, global_dry_run=dry,
+                                custom_objects_api=co, core_v1_api=core)
+        return res, co, core
+
+    def _apply_calls(co):
+        return [c for c in co.api_client.call_api.call_args_list]
+
+    # ── New CR: SSA create ──────────────────────────────────────────────
+    res, co, core = _run([_entry()], {})
+    calls = _apply_calls(co)
+    _check("[ssa] one apply call for a new CR", len(calls), 1)
+    if calls:
+        args, kw = calls[0]
+        _check("[ssa] PATCH to the namespaced resourceoverrides path",
+               (args[1], args[2].get("namespace"), args[2].get("name"), args[2].get("plural")),
+               ("PATCH", "ns", "api", "resourceoverrides"))
+        _check("[ssa] apply-patch content type",
+               args[4].get("Content-Type"), "application/apply-patch+yaml")
+        _check("[ssa] field manager = kube-resource-updater, force=true",
+               dict(args[3]), {"fieldManager": FIELD_MANAGER, "force": "true"})
+        _check("[ssa] FIELD_MANAGER constant", FIELD_MANAGER, "kube-resource-updater")
+        body = kw["body"]
+        _check("[ssa] body is a full ResourceOverride apply config",
+               (body["apiVersion"], body["kind"], body["metadata"]["name"]),
+               ("kube-resource-updater.io/v1", "ResourceOverride", "api"))
+        _check("[ssa] tool-owned label applied",
+               body["metadata"]["labels"], {"app.kubernetes.io/managed-by": "kube-resource-updater"})
+        _check("[audit] new CR stamps last-changed",
+               body["metadata"]["annotations"].get(LAST_CHANGED_ANNOTATION), "2026-10-15T12:00:00Z")
+        _check("[audit] new CR has no previous-resources",
+               PREVIOUS_RESOURCES_ANNOTATION in body["metadata"]["annotations"], False)
+    ev_calls = core.create_namespaced_event.call_args_list
+    _check("[event] one Event emitted for the new CR", len(ev_calls), 1)
+    if ev_calls:
+        ev_ns, ev_body = ev_calls[0].args[0], ev_calls[0].kwargs.get("body") or ev_calls[0].args[1]
+        _check("[event] Event in the CR's namespace", ev_ns, "ns")
+        _check("[event] reason ResourcesUpdated", ev_body["reason"], "ResourcesUpdated")
+        _check("[event] involvedObject is the CR",
+               (ev_body["involvedObject"]["kind"], ev_body["involvedObject"]["name"],
+                ev_body["involvedObject"]["uid"]),
+               ("ResourceOverride", "api", "uid-new"))
+    _check("[result] direct apply reports the namespace", res and res[0][1], ["ns"])
+
+    # ── Changed CR migrated from gitops (ArgoCD tracking metadata) ──────
+    managed = [
+        {"manager": "argocd-controller", "operation": "Apply",
+         "fieldsV1": {"f:metadata": {"f:labels": {"f:app.kubernetes.io/instance": {}},
+                                     "f:annotations": {"f:argocd.argoproj.io/tracking-id": {}}}}},
+    ]
+    live = _live(old_c,
+                 annotations={"argocd.argoproj.io/tracking-id": "app:kru/ResourceOverride:ns/api",
+                              "team": "payments",
+                              LAST_CHANGED_ANNOTATION: "2026-01-01T00:00:00Z"},
+                 labels={"app.kubernetes.io/instance": "overrides",
+                         "app.kubernetes.io/managed-by": "kube-resource-updater"},
+                 managed=managed)
+    res, co, core = _run([_entry()], {("ns", "api"): live})
+    calls = _apply_calls(co)
+    body = calls[0].kwargs["body"] if calls else {"metadata": {"annotations": {}, "labels": {}}}
+    anns = body["metadata"].get("annotations") or {}
+    _check("[audit] change stamps last-changed", anns.get(LAST_CHANGED_ANNOTATION),
+           "2026-10-15T12:00:00Z")
+    _check("[audit] change records previous-resources from the live CR",
+           _json.loads(anns.get(PREVIOUS_RESOURCES_ANNOTATION, "{}")), old_c)
+    _check("[ssa] operator annotations are NOT copied into the apply (left to their owner)",
+           "team" in anns, False)
+    _check("[strip] ArgoCD tracking-id never part of the apply", any(
+        k.startswith("argocd.argoproj.io/") for k in anns), False)
+    merge_calls = co.patch_namespaced_custom_object.call_args_list
+    strip = [c.kwargs.get("body") for c in merge_calls
+             if (c.kwargs.get("body") or {}).get("metadata")]
+    _check("[strip] merge patch removes argocd.argoproj.io/* annotations",
+           bool(strip) and strip[0]["metadata"].get("annotations"),
+           {"argocd.argoproj.io/tracking-id": None})
+    _check("[strip] instance label owned by an ArgoCD manager is removed",
+           bool(strip) and strip[0]["metadata"].get("labels"),
+           {"app.kubernetes.io/instance": None})
+    ev_body = core.create_namespaced_event.call_args.kwargs.get("body") \
+        if core.create_namespaced_event.called else {"message": ""}
+    _check("[event] message shows old → new values",
+           "100m→200m" in ev_body["message"] and "256Mi→512Mi" in ev_body["message"], True)
+
+    # instance label set by someone else (e.g. Helm) is NOT touched.
+    live_helm = _live(old_c, labels={"app.kubernetes.io/instance": "mine"}, managed=[
+        {"manager": "helm", "fieldsV1": {"f:metadata": {"f:labels": {
+            "f:app.kubernetes.io/instance": {}}}}}])
+    _res, co, _core = _run([_entry()], {("ns", "api"): live_helm})
+    strip = [c.kwargs.get("body") for c in co.patch_namespaced_custom_object.call_args_list
+             if (c.kwargs.get("body") or {}).get("metadata")]
+    _check("[strip] instance label not owned by ArgoCD is left alone", strip, [])
+
+    # ── Unchanged CR: no write, no event ────────────────────────────────
+    same = _live({"app": {"requests": dict(new_c[0]["requests"]),
+                          "limits": dict(new_c[0]["limits"])}},
+                 annotations={LAST_CHANGED_ANNOTATION: "2026-01-01T00:00:00Z"},
+                 labels={"app.kubernetes.io/managed-by": "kube-resource-updater"},
+                 managed=[{"manager": FIELD_MANAGER, "fieldsV1": {}}])
+    res, co, core = _run([_entry()], {("ns", "api"): same})
+    _check("[noop] unchanged CR → no apply", co.api_client.call_api.called, False)
+    _check("[noop] unchanged CR → no Event", core.create_namespaced_event.called, False)
+
+    # ── Stale field kept by another manager after apply → spec reset ────
+    stale = {"metadata": {"uid": "u"}, "spec": {"containers": [
+        {"name": "app", "requests": new_c[0]["requests"],
+         "limits": {"memory": "512Mi", "cpu": "2"}}]}}
+    _res, co, _core = _run([_entry()], {("ns", "api"): _live(old_c)}, apply_result=stale)
+    spec_fix = [c.kwargs.get("body") for c in co.patch_namespaced_custom_object.call_args_list
+                if (c.kwargs.get("body") or {}).get("spec")]
+    _check("[ssa] field co-owned by another manager survives SSA → spec.containers replaced",
+           bool(spec_fix) and spec_fix[0]["spec"]["containers"], new_c)
+
+    # ── Orphan deletion ─────────────────────────────────────────────────
+    def _item(ns, name):
+        return {"metadata": {"namespace": ns, "name": name,
+                             "labels": {"app.kubernetes.io/managed-by": "kube-resource-updater"}}}
+    items = [_item("ns", "api"), _item("ns", "gone"), _item("old-ns", "x")]
+    res, co, _core = _run([_entry()], {}, cluster_items=items)
+    lst = co.list_cluster_custom_object.call_args
+    _check("[prune] orphan listing filters on the tool's managed-by label",
+           (lst.kwargs or {}).get("label_selector") if lst else None,
+           "app.kubernetes.io/managed-by=kube-resource-updater")
+    deleted = sorted((c.args[2], c.args[4]) if len(c.args) >= 5 else
+                     (c.kwargs.get("namespace"), c.kwargs.get("name"))
+                     for c in co.delete_namespaced_custom_object.call_args_list)
+    _check("[prune] tool-owned CRs no longer wanted are deleted",
+           deleted, [("ns", "gone"), ("old-ns", "x")])
+    res, co, _core = _run([_entry()], {}, cluster_items=[
+        {"metadata": {"namespace": "ns", "name": "hand-made", "labels": {}}}])
+    _check("[prune] a CR without the managed-by label is never deleted",
+           co.delete_namespaced_custom_object.called, False)
+    co_fail, core_fail = _apis()
+    co_fail.list_cluster_custom_object.side_effect = ApiException(status=500)
+    with patch("src.writeback_webhook._utcnow", return_value=now):
+        _apply_direct([_entry()], state_lookup={}, global_dry_run=False,
+                      custom_objects_api=co_fail, core_v1_api=core_fail)
+    _check("[prune] listing failure → no deletion attempted",
+           co_fail.delete_namespaced_custom_object.called, False)
+    res, co, _core = _run([], {}, cluster_items=items)
+    _check("[prune] no entries at all (e.g. Prometheus outage) → nothing deleted",
+           co.delete_namespaced_custom_object.called, False)
+
+    # ── dryRun ──────────────────────────────────────────────────────────
+    res, co, core = _run([_entry()], {}, dry=True, cluster_items=items)
+    _check("[dry] global dryRun → no apply", co.api_client.call_api.called, False)
+    _check("[dry] global dryRun → no delete", co.delete_namespaced_custom_object.called, False)
+    _check("[dry] global dryRun → no Event", core.create_namespaced_event.called, False)
+    res, co, core = _run([_entry(), _entry("worker", dry=True)], {},
+                         cluster_items=[_item("ns", "worker")])
+    applied_names = [c.args[2]["name"] for c in co.api_client.call_api.call_args_list]
+    _check("[dry] per-workload dryRun entry is not applied", applied_names, ["api"])
+    _check("[dry] per-workload dryRun entry's CR is not pruned",
+           co.delete_namespaced_custom_object.called, False)
+
+    # ── write_back_webhook_all routes to the API, never to git ──────────
+    co, core = _apis()
+    with patch("src.writeback_webhook._build_entries", return_value=([_entry()], [])), \
+         patch("src.writeback_webhook._commit_repo") as commit, \
+         patch("src.writeback_webhook._utcnow", return_value=now):
+        write_back_webhook_all(
+            workloads_with_configs=[(None, None)], cr_writeback=_CRW(), provider=None,
+            git_author_name="", git_author_email="", writeback_mode="direct",
+            custom_objects_api=co, core_v1_api=core,
+        )
+    _check("[route] direct mode never touches git", commit.called, False)
+    _check("[route] direct mode applies through the API", co.api_client.call_api.called, True)
+
+    # ── gitops render drops a committed tracking-id ─────────────────────
+    prev = {"metadata": {"name": "api", "namespace": "ns",
+                         "annotations": {"argocd.argoproj.io/tracking-id": "x",
+                                         "argocd.argoproj.io/sync-options": "Prune=false"}},
+            "spec": {"containers": new_c}}
+    doc = _render_cr_doc(_entry(), prev)
+    anns = doc["metadata"].get("annotations") or {}
+    _check("[strip-gitops] ArgoCD tracking-id never carried into the rendered doc",
+           "argocd.argoproj.io/tracking-id" in anns, False)
+    _check("[strip-gitops] operator-set ArgoCD sync options are kept in gitops mode",
+           anns.get("argocd.argoproj.io/sync-options"), "Prune=false")
+
+    # ── cmd_sync wiring ─────────────────────────────────────────────────
+    cfg = _cfg(writeback_mode="direct")
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                containers=[_CRec(container_name="app")])
+    captured: dict = {}
+    with patch("main.Config") as mock_cfg_cls, \
+         patch("main._log_module.setup"), patch("main.load_config"), \
+         patch("main.log_git_credentials_state") as git_log, \
+         patch("main.list_enabled_namespaces", return_value=[_NsT(name="ns", annotations={})]), \
+         patch("main.list_workloads", return_value=[rec]), patch("main.client"), \
+         patch("main.build_provider") as bp, \
+         patch("src.writeback_webhook.fetch_oom_state", return_value={}), \
+         patch("src.writeback_webhook.detect_oom_events", return_value={}), \
+         patch("main.write_back_webhook_all",
+               side_effect=lambda **kw: captured.update(kw)):
+        mock_cfg_cls.load.return_value = cfg
+        rc_sync = _main.cmd_sync(_argparse.Namespace(mr=None))
+    _check("[sync] direct mode exits 0 without any git configuration", rc_sync, 0)
+    _check("[sync] direct mode builds no git provider", bp.called, False)
+    _check("[sync] direct mode skips the git credential log", git_log.called, False)
+    _check("[sync] write-back told to apply directly", captured.get("writeback_mode"), "direct")
+
+    # ── Chart ───────────────────────────────────────────────────────────
+    helm = shutil.which("helm")
+    chart_dir = _chart_dir()
+    if not helm or not os.path.isdir(chart_dir):
+        print(f"  [{_SKIP}] helm CLI or chart dir unavailable — skipping chart renders")
+        return
+
+    def _tpl(sets, show=None):
+        cmd = [helm, "template", "kru", chart_dir, "--set", "config.prometheusUrl=http://p:9090"]
+        for kv in sets:
+            cmd += ["--set", kv]
+        if show:
+            cmd += ["--show-only", show]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    rc_d, out_d = _tpl(["config.writebackMode=direct"], "templates/clusterrole.yaml")
+    _check("[chart] direct mode renders without crWriteback / git token", rc_d, 0)
+    _check("[chart] direct mode grants create/patch/delete on resourceoverrides",
+           '["create", "patch", "delete"]' in out_d, True)
+    _check("[chart] direct mode grants create/patch on events",
+           'resources: ["events"]' in out_d, True)
+    rc_g, out_g = _tpl(["config.crWriteback.repoUrl=https://e/r.git",
+                        "config.crWriteback.path=o", "git.token=t"],
+                       "templates/clusterrole.yaml")
+    _check("[chart] gitops render still fine", rc_g, 0)
+    _check("[chart] gitops mode has NO write verbs on resourceoverrides",
+           '["create", "patch", "delete"]' in out_g, False)
+    _check("[chart] gitops mode has NO events grant", 'resources: ["events"]' in out_g, False)
+    rc_m, _o = _tpl([])
+    _check("[chart] gitops mode still requires crWriteback (render fails without it)",
+           rc_m != 0, True)
+    rc_bad, out_bad = _tpl(["config.writebackMode=push-only"])
+    _check("[chart] unknown writebackMode rejected by the schema", rc_bad != 0, True)
+    rc_cm, out_cm = _tpl(["config.writebackMode=direct"], "templates/configmap.yaml")
+    _check("[chart] ConfigMap carries writebackMode: direct",
+           "writebackMode: direct" in out_cm, True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -11789,6 +12121,7 @@ def main() -> int:
     section_emit_cpu_limits()
     section_max_change_cap()
     section_change_audit_and_cooldown()
+    section_writeback_direct_mode()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

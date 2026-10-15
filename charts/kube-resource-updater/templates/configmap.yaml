@@ -5,12 +5,13 @@ the CronJob is the component that writes ResourceOverride CRs to git. A
 webhook-only install (`cronjob.enabled: false`) never writes to git; it reads
 only log-level / skip-containers from this ConfigMap, so forcing crWriteback
 on it is a footgun (the documented standalone-webhook mode would fail to
-install). Defence-in-depth pair: the tool also re-validates these in
+install). Direct write-back (`config.writebackMode: direct`) never touches
+git either, so the gate is skipped there too. Defence-in-depth pair: the tool also re-validates these in
 Config.validate() at startup, but failing at template-render time gives the
 operator a clear, actionable error before any cluster state is touched.
 `branch` has a sane default ("main") in values.yaml so it isn't required here.
 */}}
-{{- if .Values.cronjob.enabled }}
+{{- if and .Values.cronjob.enabled (ne (.Values.config.writebackMode | default "gitops") "direct") }}
 {{- $_ := required "config.crWriteback.repoUrl is required when cronjob.enabled — the sync CronJob needs to know where to write ResourceOverride CRs (set it in values: config.crWriteback.repoUrl)." (((.Values.config | default dict).crWriteback | default dict).repoUrl | default "") }}
 {{- $_ := required "config.crWriteback.path is required when cronjob.enabled — the sync CronJob needs to know which directory in the repo to write ResourceOverride CRs to (set it in values: config.crWriteback.path)." (((.Values.config | default dict).crWriteback | default dict).path | default "") }}
 {{- end }}

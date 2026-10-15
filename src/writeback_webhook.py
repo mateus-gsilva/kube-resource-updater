@@ -68,6 +68,21 @@ CR_FILE_SUFFIX = ".resource-override.yaml"
 # webhook server's expectations (src/webhook_cache.py).
 CR_API_VERSION = "kube-resource-updater.io/v1"
 CR_KIND = "ResourceOverride"
+CR_GROUP = "kube-resource-updater.io"
+CR_VERSION = "v1"
+CR_PLURAL = "resourceoverrides"
+
+# Label every tool-rendered CR carries; the ownership marker for pruning.
+MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
+MANAGED_BY_VALUE = "kube-resource-updater"
+
+# Server-side-apply field manager for direct write-back.
+FIELD_MANAGER = "kube-resource-updater"
+
+# ArgoCD tracking metadata. See `_argocd_tracking_metadata` for the strip rule.
+ARGOCD_ANNOTATION_PREFIX = "argocd.argoproj.io/"
+ARGOCD_TRACKING_ID_ANNOTATION = "argocd.argoproj.io/tracking-id"
+ARGOCD_INSTANCE_LABEL = "app.kubernetes.io/instance"
 
 
 # Change-audit annotations, written on the CR every time its container
@@ -209,7 +224,7 @@ class HeldContainer:
 def write_back_webhook_all(
     workloads_with_configs: list[tuple[WorkloadRecommendation, Config]],
     cr_writeback: CrWritebackConfig,
-    provider: GitProvider,
+    provider: GitProvider | None,
     git_author_name: str,
     git_author_email: str,
     dry_run: bool = False,
@@ -221,8 +236,15 @@ def write_back_webhook_all(
     oom_floor_reset_lookup: dict[tuple[str, str], bool] | None = None,
     health_gate_lookup: dict[tuple[str, str], bool] | None = None,
     auto_rollout_by_namespace: dict[str, bool] | None = None,
+    writeback_mode: str = "gitops",
+    custom_objects_api=None,
+    core_v1_api=None,
 ) -> list[tuple[str, list[str]]] | None:
     """Generate ResourceOverride CR files and commit them to the configured central repo.
+
+    With `writeback_mode="direct"` the same entries are server-side applied
+    to the cluster API instead (see `_apply_direct`); `provider` and the git
+    arguments are unused and may be None / empty.
 
     `workloads_with_configs` is the output of the resolver: each workload has its
     own effective `Config` already (helm defaults + namespace annotations + workload
@@ -274,6 +296,15 @@ def write_back_webhook_all(
     # each pair's Config.dry_run, so the per-entry value inherits the cluster
     # default. Keeping the global OR preserves the existing --dry-run CLI /
     # cluster-ConfigMap behavior (set once, covers everything).
+    if writeback_mode == "direct":
+        return _apply_direct(
+            entries,
+            state_lookup=oom_state_lookup or {},
+            global_dry_run=dry_run,
+            custom_objects_api=custom_objects_api,
+            core_v1_api=core_v1_api,
+        )
+
     dry_entries = [e for e in entries if e.dry_run or dry_run]
     write_entries = [e for e in entries if not (e.dry_run or dry_run)]
 
@@ -573,6 +604,13 @@ def fetch_oom_state(
                 "annotations": dict(anns),
                 "labels": dict(meta.get("labels") or {}),
                 "containers": containers,
+                # Direct write-back reads these to decide whether the CR
+                # changed, which tracking metadata to strip, and which
+                # object an Event refers to.
+                "selector": dict((spec.get("selector") or {}).get("matchLabels") or {}),
+                "managed_fields": list(meta.get("managedFields") or []),
+                "uid": meta.get("uid", ""),
+                "resource_version": meta.get("resourceVersion", ""),
             }
     return out
 
@@ -1892,6 +1930,10 @@ def _render_cr_doc(e: WebhookEntry, prev_doc: dict | None = None) -> dict:
     if prev_doc:
         prev_meta = prev_doc.get("metadata") or {}
         for k, v in (prev_meta.get("annotations") or {}).items():
+            if k == ARGOCD_TRACKING_ID_ANNOTATION:
+                # Written by ArgoCD on the live object, never meaningful in
+                # git; carrying it would make another Application claim the CR.
+                continue
             if _is_oom_annotation(k):
                 # Owned by the OOM logic — handled below via
                 # e.oom_annotations. Skip here to drop legacy CSV keys
@@ -2009,6 +2051,302 @@ def _ordered_container(c: dict) -> dict:
     if c.get("limits"):
         out["limits"] = c["limits"]
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Direct write-back (server-side apply)                                       #
+# --------------------------------------------------------------------------- #
+
+def _argocd_tracking_metadata(live: dict) -> tuple[list[str], list[str]]:
+    """Return `(annotation_keys, label_keys)` of ArgoCD tracking metadata on a
+    live CR that direct write-back must remove.
+
+    Rule:
+      - every `argocd.argoproj.io/*` annotation — ArgoCD's tracking-id and
+        per-resource options only mean something on an object an
+        Application manages, which a directly-applied CR must not be;
+      - the `app.kubernetes.io/instance` label ONLY when a field manager
+        whose name starts with `argocd` owns it (ArgoCD label tracking).
+        The same label set by Helm, kustomize or a person is left alone —
+        the tool cannot tell those apart from intent, managedFields can.
+
+    Left in place, a tracking annotation/label makes ArgoCD treat the CR as
+    belonging to the Application that used to render it, and auto-prune
+    deletes it on the next sync.
+    """
+    anns = [k for k in sorted(live.get("annotations") or {})
+            if k.startswith(ARGOCD_ANNOTATION_PREFIX)]
+    labels: list[str] = []
+    if ARGOCD_INSTANCE_LABEL in (live.get("labels") or {}):
+        for mf in live.get("managed_fields") or []:
+            if not str(mf.get("manager", "")).lower().startswith("argocd"):
+                continue
+            owned = (((mf.get("fieldsV1") or {}).get("f:metadata") or {})
+                     .get("f:labels") or {})
+            if f"f:{ARGOCD_INSTANCE_LABEL}" in owned:
+                labels.append(ARGOCD_INSTANCE_LABEL)
+                break
+    return anns, labels
+
+
+def _direct_apply_body(e: WebhookEntry, live: dict | None) -> dict:
+    """Apply configuration for one CR: ONLY the fields the tool owns.
+
+    Operator annotations/labels on the live object are deliberately not
+    copied — under server-side apply they stay with their own manager, so
+    nothing foreign is claimed (and with `force` nothing foreign is
+    overwritten either).
+    """
+    live_anns = (live or {}).get("annotations") or {}
+    annotations: dict[str, str] = {
+        k: live_anns[k]
+        for k in (LAST_CHANGED_ANNOTATION, PREVIOUS_RESOURCES_ANNOTATION)
+        if k in live_anns
+    }
+    annotations.update(e.oom_annotations or {})
+    _stamp_change_audit(
+        annotations, e.containers,
+        [{"name": n, **v} for n, v in ((live or {}).get("containers") or {}).items()],
+        existed=live is not None,
+    )
+    return {
+        "apiVersion": CR_API_VERSION,
+        "kind": CR_KIND,
+        "metadata": {
+            "name": e.cr_name,
+            "namespace": e.namespace,
+            "labels": {MANAGED_BY_LABEL: MANAGED_BY_VALUE},
+            "annotations": annotations,
+        },
+        "spec": {
+            "selector": {"matchLabels": {k: str(v) for k, v in e.selector_labels.items()}},
+            "containers": [_ordered_container(c) for c in e.containers],
+        },
+    }
+
+
+def _direct_unchanged(body: dict, live: dict | None) -> bool:
+    """True when applying `body` would not change the live CR."""
+    if live is None:
+        return False
+    if _containers_index(body["spec"]["containers"]) != _containers_index(
+            [{"name": n, **v} for n, v in (live.get("containers") or {}).items()]):
+        return False
+    if body["spec"]["selector"]["matchLabels"] != (live.get("selector") or {}):
+        return False
+    live_anns = live.get("annotations") or {}
+    want = body["metadata"]["annotations"]
+    if any(live_anns.get(k) != v for k, v in want.items()):
+        return False
+    # A tool-owned OOM annotation the new state drops (e.g. oomFloorReset)
+    # still needs an apply so server-side apply removes it.
+    if any((_is_oom_annotation(k) or k.startswith(OOM_INVESTIGATION_PREFIX)) and k not in want
+           for k in live_anns):
+        return False
+    if (live.get("labels") or {}).get(MANAGED_BY_LABEL) != MANAGED_BY_VALUE:
+        return False
+    anns, labels = _argocd_tracking_metadata(live)
+    return not anns and not labels
+
+
+def _ssa_apply(custom_objects_api, namespace: str, name: str, body: dict) -> dict:
+    """Server-side apply one ResourceOverride.
+
+    The generated client hard-codes `merge-patch+json` for custom objects,
+    so the apply goes through `call_api` with the apply content type. `force`
+    only re-acquires fields present in `body`, which holds tool-owned fields
+    exclusively.
+    """
+    return custom_objects_api.api_client.call_api(
+        "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}", "PATCH",
+        {"group": CR_GROUP, "version": CR_VERSION, "namespace": namespace,
+         "plural": CR_PLURAL, "name": name},
+        [("fieldManager", FIELD_MANAGER), ("force", "true")],
+        {"Accept": "application/json", "Content-Type": "application/apply-patch+yaml"},
+        body=body,
+        response_type="object",
+        auth_settings=["BearerToken"],
+        _return_http_data_only=True,
+    )
+
+
+def _resource_change_summary(old: dict[str, dict], new: dict[str, dict]) -> str:
+    """`app: requests.cpu 100m→200m, limits.memory 256Mi→512Mi; side: added`."""
+    parts: list[str] = []
+    for name in sorted(set(old) | set(new)):
+        if name not in old:
+            parts.append(f"{name}: added")
+            continue
+        if name not in new:
+            parts.append(f"{name}: removed")
+            continue
+        diffs = []
+        for section in ("requests", "limits"):
+            o, n = old[name].get(section) or {}, new[name].get(section) or {}
+            for key in ("cpu", "memory"):
+                if o.get(key) != n.get(key):
+                    diffs.append(f"{section}.{key} {o.get(key, '—')}→{n.get(key, '—')}")
+        if diffs:
+            parts.append(f"{name}: " + ", ".join(diffs))
+    return "; ".join(parts) or "no resource change"
+
+
+def _emit_change_event(core_v1_api, namespace: str, name: str, uid: str,
+                       resource_version: str, message: str) -> None:
+    """Record a `ResourcesUpdated` Event on the CR. Best effort — a failed
+    Event never fails the sync (the CR annotations hold the same facts)."""
+    if core_v1_api is None:
+        return
+    ts = _rfc3339(_utcnow())
+    body = {
+        "metadata": {"generateName": f"{name}.", "namespace": namespace},
+        "involvedObject": {
+            "apiVersion": CR_API_VERSION, "kind": CR_KIND, "name": name,
+            "namespace": namespace, "uid": uid, "resourceVersion": resource_version,
+        },
+        "reason": "ResourcesUpdated",
+        "message": message[:1024],
+        "type": "Normal",
+        "source": {"component": FIELD_MANAGER},
+        "reportingComponent": FIELD_MANAGER,
+        "reportingInstance": "sync",
+        "firstTimestamp": ts,
+        "lastTimestamp": ts,
+        "count": 1,
+    }
+    try:
+        core_v1_api.create_namespaced_event(namespace, body=body)
+    except Exception as exc:  # noqa: BLE001 — audit Event is best effort
+        _log.warning("[direct] could not record Event for %s/%s: %s", namespace, name, exc)
+
+
+def _apply_direct(
+    entries: list[WebhookEntry],
+    *,
+    state_lookup: dict[tuple[str, str], dict],
+    global_dry_run: bool,
+    custom_objects_api,
+    core_v1_api,
+) -> list[tuple[str, list[str]]] | None:
+    """Server-side apply every entry and delete tool-owned CRs no longer wanted.
+
+    Orphan scope mirrors gitops pruning: a CR labelled
+    `app.kubernetes.io/managed-by=kube-resource-updater` that no entry of this
+    sync renders is deleted — a namespace that stopped opting in, a workload
+    that went away. Nothing is pruned when the sync produced no entries at all
+    (gitops never commits in that case either), when the listing fails, or
+    for a per-workload dryRun entry. CRs without the label are never listed.
+    """
+    from kubernetes.client.rest import ApiException
+
+    applied: list[WebhookEntry] = []
+    unchanged = 0
+    failed = 0
+    for e in entries:
+        live = state_lookup.get((e.namespace, e.cr_name))
+        body = _direct_apply_body(e, live)
+        if _direct_unchanged(body, live):
+            unchanged += 1
+            continue
+        old_idx = _containers_index(
+            [{"name": n, **v} for n, v in ((live or {}).get("containers") or {}).items()])
+        new_idx = _containers_index(body["spec"]["containers"])
+        summary = _resource_change_summary(old_idx, new_idx) if live else "created"
+        if e.dry_run or global_dry_run:
+            _log.info("[DRY RUN] would apply ResourceOverride %s/%s (%s)",
+                      e.namespace, e.cr_name, summary)
+            continue
+        try:
+            result = _ssa_apply(custom_objects_api, e.namespace, e.cr_name, body) or {}
+            # A field another manager co-owns survives an apply that omits it
+            # (e.g. `limits.cpu` written by ArgoCD before the switch to direct
+            # mode). Replace the list wholesale when the result disagrees.
+            got = _containers_index(((result.get("spec") or {}).get("containers")) or [])
+            if got and got != new_idx:
+                custom_objects_api.patch_namespaced_custom_object(
+                    CR_GROUP, CR_VERSION, e.namespace, CR_PLURAL, e.cr_name,
+                    body={"spec": {"containers": body["spec"]["containers"]}},
+                    field_manager=FIELD_MANAGER,
+                )
+            strip_anns, strip_labels = _argocd_tracking_metadata(live or {})
+            if strip_anns or strip_labels:
+                meta: dict = {}
+                if strip_anns:
+                    meta["annotations"] = {k: None for k in strip_anns}
+                if strip_labels:
+                    meta["labels"] = {k: None for k in strip_labels}
+                custom_objects_api.patch_namespaced_custom_object(
+                    CR_GROUP, CR_VERSION, e.namespace, CR_PLURAL, e.cr_name,
+                    body={"metadata": meta}, field_manager=FIELD_MANAGER,
+                )
+                _log.info("[direct] %s/%s: removed ArgoCD tracking metadata %s",
+                          e.namespace, e.cr_name, ", ".join(strip_anns + strip_labels))
+        except ApiException as exc:
+            failed += 1
+            _log.error("[direct] apply of ResourceOverride %s/%s failed: %s",
+                       e.namespace, e.cr_name, exc)
+            continue
+        meta = result.get("metadata") or {}
+        _emit_change_event(core_v1_api, e.namespace, e.cr_name,
+                           meta.get("uid") or (live or {}).get("uid", ""),
+                           meta.get("resourceVersion", ""), summary)
+        _log.info("[direct] applied ResourceOverride %s/%s (%s)",
+                  e.namespace, e.cr_name, summary)
+        applied.append(e)
+
+    deleted = _prune_orphan_crs(entries, global_dry_run=global_dry_run,
+                                custom_objects_api=custom_objects_api)
+    _log.info("[direct] %d applied, %d unchanged, %d failed, %d orphan(s) deleted",
+              len(applied), unchanged, failed, len(deleted))
+    if not applied and not deleted:
+        return None
+    namespaces = sorted({e.namespace for e in applied} | {ns for ns, _ in deleted})
+    return [(f"apiserver ({len(applied)} applied, {len(deleted)} deleted)", namespaces)]
+
+
+def _prune_orphan_crs(
+    entries: list[WebhookEntry],
+    *,
+    global_dry_run: bool,
+    custom_objects_api,
+) -> list[tuple[str, str]]:
+    """Delete tool-labelled CRs that no entry of this sync renders."""
+    from kubernetes.client.rest import ApiException
+
+    if not entries:
+        return []
+    keep = {(e.namespace, e.cr_name) for e in entries}
+    try:
+        listing = custom_objects_api.list_cluster_custom_object(
+            CR_GROUP, CR_VERSION, CR_PLURAL,
+            label_selector=f"{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}",
+        )
+    except ApiException as exc:
+        _log.warning("[direct] could not list tool-owned ResourceOverrides (%s) — "
+                     "orphan cleanup skipped this sync", exc)
+        return []
+    deleted: list[tuple[str, str]] = []
+    for item in (listing or {}).get("items") or []:
+        meta = item.get("metadata") or {}
+        ns, name = meta.get("namespace"), meta.get("name")
+        if not ns or not name or (ns, name) in keep:
+            continue
+        if (meta.get("labels") or {}).get(MANAGED_BY_LABEL) != MANAGED_BY_VALUE:
+            continue  # defence in depth against a selector-ignoring API
+        if global_dry_run:
+            _log.info("[DRY RUN] would delete orphan ResourceOverride %s/%s", ns, name)
+            continue
+        try:
+            custom_objects_api.delete_namespaced_custom_object(
+                CR_GROUP, CR_VERSION, ns, CR_PLURAL, name)
+        except ApiException as exc:
+            if getattr(exc, "status", None) != 404:
+                _log.error("[direct] delete of orphan ResourceOverride %s/%s failed: %s",
+                           ns, name, exc)
+            continue
+        _log.info("[direct] deleted orphan ResourceOverride %s/%s", ns, name)
+        deleted.append((ns, name))
+    return deleted
 
 
 # --------------------------------------------------------------------------- #

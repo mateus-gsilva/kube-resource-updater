@@ -63,6 +63,7 @@
     "config": {
       "type": "object",
       "properties": {
+        "writebackMode": { "type": "string", "enum": ["gitops", "direct"] },
         "gitProvider": { "type": "string", "enum": ["", "auto", "gitlab", "github"] },
         "dryRun": { "type": ["boolean", "string"] },
         "createMr": { "type": ["boolean", "string"] },

@@ -121,7 +121,8 @@ def _log_global_config(cfg: Config) -> None:
     if cfg.grow_only:     flags.append("growOnly=true")
     if cfg.shrink_only:   flags.append("shrinkOnly=true")
     if cfg.dry_run:       flags.append("dryRun=true")
-    if not cfg.create_mr: flags.append("createMr=false")
+    if cfg.is_direct:     flags.append("writebackMode=direct")
+    elif not cfg.create_mr: flags.append("createMr=false")
     if rc.round_values:   flags.append("roundValues=true")
     if flags:
         _log.info("[config] flags: %s", "  ".join(flags))
@@ -203,15 +204,19 @@ def cmd_sync(args: argparse.Namespace) -> int:
     # protects against a hand-edited ConfigMap drifting past that gate.
     cfg.validate()
 
-    log_git_credentials_state(
-        repo_url=cfg.cr_writeback.repo_url,
-        git_token=cfg.git_token,
-        git_provider=cfg.git_provider,
-        git_username=cfg.git_username,
-        app_configured=bool(
-            cfg.git_app_id and cfg.git_installation_id and cfg.git_app_private_key
-        ),
-    )
+    if cfg.is_direct:
+        _log.info("[direct] writebackMode=direct — ResourceOverrides are server-side "
+                  "applied to the cluster API; no git repository is used")
+    else:
+        log_git_credentials_state(
+            repo_url=cfg.cr_writeback.repo_url,
+            git_token=cfg.git_token,
+            git_provider=cfg.git_provider,
+            git_username=cfg.git_username,
+            app_configured=bool(
+                cfg.git_app_id and cfg.git_installation_id and cfg.git_app_private_key
+            ),
+        )
     _log_global_config(cfg)
 
     load_config()
@@ -432,19 +437,20 @@ def cmd_sync(args: argparse.Namespace) -> int:
         # buckets entries by `create_mr` and emits up to two pushes per repo:
         # one direct, one MR. The CLI flag `--mr` still flips
         # the helm-level default before resolution, kept for local dev parity.
+        provider = None if cfg.is_direct else build_provider(
+            repo_url=cfg.cr_writeback.repo_url,
+            token=cfg.git_token,
+            provider_override=cfg.git_provider,
+            api_url=cfg.git_api_url,
+            username=cfg.git_username,
+            app_id=cfg.git_app_id,
+            installation_id=cfg.git_installation_id,
+            app_private_key=cfg.git_app_private_key,
+        )
         results = write_back_webhook_all(
             workloads_with_configs=pairs,
             cr_writeback=cfg.cr_writeback,
-            provider=build_provider(
-                repo_url=cfg.cr_writeback.repo_url,
-                token=cfg.git_token,
-                provider_override=cfg.git_provider,
-                api_url=cfg.git_api_url,
-                username=cfg.git_username,
-                app_id=cfg.git_app_id,
-                installation_id=cfg.git_installation_id,
-                app_private_key=cfg.git_app_private_key,
-            ),
+            provider=provider,
             git_author_name=cfg.git_author_name,
             git_author_email=cfg.git_author_email,
             dry_run=cfg.dry_run,
@@ -456,6 +462,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
             oom_floor_reset_lookup=oom_floor_reset_lookup,
             health_gate_lookup=health_gate_lookup,
             auto_rollout_by_namespace=auto_rollout_by_namespace,
+            writeback_mode=cfg.writeback_mode,
+            custom_objects_api=co_api,
+            core_v1_api=client.CoreV1Api() if cfg.is_direct else None,
         )
 
     if not results:
@@ -474,12 +483,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
         if n_mr:
             parts.append(f"{n_mr} MR")
         if n_push:
-            parts.append(f"{n_push} direct")
+            parts.append(f"{n_push} {'applied' if cfg.is_direct else 'direct'}")
         subtitle = ", ".join(parts) if parts else None
         _log_module.log_phase_banner(_log, "result", subtitle=subtitle)
         for i, (url, namespaces) in enumerate(results):
             is_mr = "/merge_requests/" in url or "/-/merge_requests/" in url or "/pull/" in url
-            label = "MR" if is_mr else "Pushed"
+            label = "MR" if is_mr else ("Applied" if cfg.is_direct else "Pushed")
             # Same blank-between-not-before pattern as the discovery loop:
             # banner already supplies the leading separator.
             if i > 0:

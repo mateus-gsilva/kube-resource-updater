@@ -349,6 +349,15 @@ class Config:
     git_app_id: str = ""
     git_installation_id: str = ""
     git_app_private_key: str = ""
+    # Where rendered ResourceOverrides go. "gitops" (default) commits them to
+    # crWriteback.repoUrl for a GitOps engine to apply; "direct" server-side
+    # applies them to the cluster API and records the audit trail on the CR
+    # (annotations + Kubernetes Events) instead of in git history.
+    writeback_mode: str = "gitops"
+
+    @property
+    def is_direct(self) -> bool:
+        return self.writeback_mode == "direct"
 
     def validate(self) -> None:
         """Fail fast at runtime when configuration is missing or inconsistent.
@@ -375,11 +384,20 @@ class Config:
         import sys
 
         errors: list[str] = []
+        gitops = not self.is_direct
+
+        if self.writeback_mode not in ("gitops", "direct"):
+            errors.append(
+                f"config.writebackMode = {self.writeback_mode!r} is not a valid mode. "
+                f"Allowed values: 'gitops' (commit CRs to git), 'direct' (apply CRs "
+                f"to the cluster API)."
+            )
 
         # ── (1) Required keys ─────────────────────────────────────────────
-        if not self.cr_writeback.repo_url:
+        # Git settings only matter in gitops mode; direct mode never clones.
+        if gitops and not self.cr_writeback.repo_url:
             errors.append("config.crWriteback.repoUrl is empty (required)")
-        if not self.cr_writeback.path:
+        if gitops and not self.cr_writeback.path:
             errors.append("config.crWriteback.path is empty (required)")
         # Leading-slash path is a real footgun:
         # `os.path.join(repo_dir, path)` discards `repo_dir` when `path`
@@ -511,7 +529,7 @@ class Config:
         _has_app_auth = bool(
             self.git_app_id and self.git_installation_id and self.git_app_private_key
         )
-        if self.create_mr and not _effective_token and not _has_app_auth:
+        if gitops and self.create_mr and not _effective_token and not _has_app_auth:
             errors.append(
                 "config.createMr is true but no git credentials are configured — every "
                 "MR the tool tries to open will crash with 401. Set git.token "
@@ -634,7 +652,9 @@ class Config:
         # to the system identity ("user@host"), confusing commit attribution
         # and misattributing MR descriptions.
         name = (self.git_author_name or "").strip()
-        if not name:
+        if not gitops:
+            pass  # no commits in direct mode — author identity is unused
+        elif not name:
             errors.append(
                 "config.gitAuthorName is empty or whitespace-only — git would "
                 "fall back to system identity ('user@host') and commits would "
@@ -653,7 +673,9 @@ class Config:
         # '@', empty local-part or domain. Not trying to validate full
         # RFC 5322; the goal is "git happy AND GitLab happy".
         email = (self.git_author_email or "").strip()
-        if not email:
+        if not gitops:
+            pass
+        elif not email:
             errors.append(
                 "config.gitAuthorEmail is empty — git accepts it but GitLab "
                 "push hooks may reject the commit as having no committer. "
@@ -754,6 +776,7 @@ class Config:
             git_app_id=os.environ.get("GITHUB_APP_ID", "").strip(),
             git_installation_id=os.environ.get("GITHUB_APP_INSTALLATION_ID", "").strip(),
             git_app_private_key=os.environ.get("GITHUB_APP_PRIVATE_KEY", ""),
+            writeback_mode=str(cfg.get("writebackMode", "gitops") or "gitops").strip().lower(),
         )
 
     @classmethod
@@ -821,6 +844,7 @@ class Config:
             git_app_id=os.environ.get("GITHUB_APP_ID", "").strip(),
             git_installation_id=os.environ.get("GITHUB_APP_INSTALLATION_ID", "").strip(),
             git_app_private_key=os.environ.get("GITHUB_APP_PRIVATE_KEY", ""),
+            writeback_mode=(os.environ.get("WRITEBACK_MODE", "gitops") or "gitops").strip().lower(),
         )
 
     @classmethod

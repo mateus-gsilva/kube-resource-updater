@@ -59,6 +59,18 @@ rules:
   - apiGroups: ["kube-resource-updater.io"]
     resources: ["resourceoverrides"]
     verbs: ["get", "list"]
+  {{- if eq (.Values.config.writebackMode | default "gitops") "direct" }}
+  # Direct write-back (`config.writebackMode: direct`): server-side apply of
+  # each CR, cleanup of tool-owned CRs no longer wanted, and one Event per
+  # change as the audit trail. Absent in gitops mode, where CR writes go
+  # through git and the GitOps engine.
+  - apiGroups: ["kube-resource-updater.io"]
+    resources: ["resourceoverrides"]
+    verbs: ["create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  {{- end }}
   {{- /*
   Discovery-mode reads (endpoints in `default`, services + Prometheus CR
   in `monitoring`) moved to namespace-scoped Roles in `templates/discovery-rbac.yaml` Pre-1.20.0 they were granted cluster-wide here; the
