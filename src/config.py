@@ -145,6 +145,12 @@ class ResourceConfig:
     # case without holding back workloads that have genuinely been running
     # for a couple of days. 0 disables the gate.
     min_sample_coverage: float = 0.25
+    # When False, `limits.cpu` is never written into a ResourceOverride (and
+    # one an existing CR carries is dropped on the next sync). The webhook
+    # replaces each patched container's `limits` sub-tree with the CR's, so
+    # pods end up with no CPU limit at all — CPU is then bounded by requests
+    # (CFS shares) instead of a hard quota that throttles bursts.
+    emit_cpu_limits: bool = True
 
     @property
     def effective_cpu_request_margin(self) -> float:
@@ -214,6 +220,7 @@ class ResourceConfig:
             max_restarts_in_window=_int_bound(
                 d.get("maxRestartsInWindow", 3), default=3, field="maxRestartsInWindow"),
             min_sample_coverage=float(d.get("minSampleCoverage", "0.25")),
+            emit_cpu_limits=_bool(d.get("emitCpuLimits", True), default=True),
         )
 
     @classmethod
@@ -249,6 +256,7 @@ class ResourceConfig:
             health_gate_enabled=os.environ.get("HEALTH_GATE_ENABLED", "true").lower() in ("1", "true", "yes"),
             max_restarts_in_window=int(os.environ.get("MAX_RESTARTS_IN_WINDOW", "3")),
             min_sample_coverage=float(os.environ.get("MIN_SAMPLE_COVERAGE", "0.25")),
+            emit_cpu_limits=os.environ.get("EMIT_CPU_LIMITS", "true").lower() in ("1", "true", "yes"),
         )
 
 

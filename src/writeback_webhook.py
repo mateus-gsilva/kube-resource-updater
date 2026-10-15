@@ -1179,6 +1179,12 @@ def _build_containers_payload(
         # floor or above the ceiling, this clamps it back into bounds.
         res = _enforce_floors(res, bounds)
 
+        # ── (5b) CPU-limit emission policy ────────────────────────────────
+        # Applied last so no earlier step (Prometheus, cold-start synthesis,
+        # grow/shrink carrying the old CR value) can reintroduce it.
+        if not rc.emit_cpu_limits:
+            res = _drop_cpu_limit(res)
+
         # ── (6) OOM bump suppression detection ────────────────────────────
         # Did the OOM bump's intended lim survive grow/shrink + final floors?
         # If not (typically because shrink_only reverted the growth), the
@@ -1423,6 +1429,20 @@ def _normalize_rfc3339(value) -> str | None:
         return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     s = str(value).strip()
     return s or None
+
+
+def _drop_cpu_limit(res: dict) -> dict:
+    """Return `res` without `limits.cpu` (and without an emptied `limits`)."""
+    limits = dict(res.get("limits") or {})
+    if "cpu" not in limits:
+        return res
+    limits.pop("cpu")
+    out = dict(res)
+    if limits:
+        out["limits"] = limits
+    else:
+        out.pop("limits", None)
+    return out
 
 
 def _apply_oom_floor(res: dict, floor_bytes: int, multiplier: float) -> dict:

@@ -95,6 +95,7 @@ Run:
 #   section_public_readiness_chart_fixes           Public-readiness chart fixes — labels, NOTES, pdb, seccomp, replicas,
 #   section_health_gate                            Sample-quality gates — crash-loop health + data sufficiency
 #   section_grow_shrink_baseline_always_fetched   growOnly / shrinkOnly baseline — live CR state fetched unconditionally
+#   section_emit_cpu_limits                        emitCpuLimits — no limits.cpu in the CR when disabled
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -11049,6 +11050,107 @@ def section_grow_shrink_baseline_always_fetched() -> None:
            "resourceoverrides" in res.stdout, True)
 
 
+def section_emit_cpu_limits() -> None:
+    """`config.emitCpuLimits: false` — never write `limits.cpu` into a CR.
+
+    CPU limits throttle (CFS quota) instead of protecting anything for most
+    workloads, so a common policy is "requests only for CPU". The flag must
+    hold through every path that can produce a CPU limit (Prometheus,
+    cold-start synthesis, grow/shrink carrying an old value), drop a
+    `limits.cpu` an existing CR already carries, and resolve through the
+    usual helm < namespace < workload chain.
+    """
+    _section("emitCpuLimits — no limits.cpu in the CR when disabled")
+
+    from types import SimpleNamespace
+    from src.config import ResourceConfig as _RC
+    from src.webhook_cache import ContainerOverride, ResourceOverride
+    from src.webhook_patch import build_patches
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    from src.writeback_webhook import _build_containers_payload
+
+    P = "kube-resource-updater."
+    M = 1024 * 1024
+    _check("[default] emitCpuLimits defaults to true (current behaviour)",
+           _RC().emit_cpu_limits, True)
+    _check("[config] emitCpuLimits: false parsed from the ConfigMap",
+           _RC.from_dict({"emitCpuLimits": False}).emit_cpu_limits, False)
+    _check("[config] emitCpuLimits: \"false\" (string) parsed from the ConfigMap",
+           _RC.from_dict({"emitCpuLimits": "false"}).emit_cpu_limits, False)
+    base = _base_config()
+    _check("[hier] namespace annotation disables CPU limits",
+           resolve_for_workload(base, {P + "emitCpuLimits": "false"}, {}).resource.emit_cpu_limits,
+           False)
+    _check("[hier] workload annotation re-enables over the namespace",
+           resolve_for_workload(base, {P + "emitCpuLimits": "false"},
+                                {P + "emitCpuLimits": "true"}).resource.emit_cpu_limits,
+           True)
+
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                containers=[_CRec(container_name="app")])
+    prom = SimpleNamespace(cpu_request_m=200, memory_request_bytes=128 * M,
+                           cpu_limit_m=800, memory_limit_bytes=384 * M)
+
+    def _build(cfg, state=None, events=None):
+        with _no_health_gate(), patch("src.writeback_webhook._query_prom_values",
+                                      return_value=prom):
+            payload, _a, _h = _build_containers_payload(
+                rec, cfg, oom_state=state, oom_events=events or {},
+                oom_eligible=True, health_gate_enabled=False,
+            )
+        return payload
+
+    cfg_on = _base_config()
+    cfg_on.prometheus_url = "http://prom:9090"
+    p_on = _build(cfg_on)
+    _check("[payload] default → limits.cpu written", p_on[0]["limits"].get("cpu"), "800m")
+
+    cfg_off = _base_config()
+    cfg_off.prometheus_url = "http://prom:9090"
+    cfg_off.resource.emit_cpu_limits = False
+    p_off = _build(cfg_off)
+    _check("[payload] emitCpuLimits=false → no limits.cpu", "cpu" in p_off[0]["limits"], False)
+    _check("[payload] emitCpuLimits=false → requests.cpu still written",
+           p_off[0]["requests"].get("cpu"), "200m")
+    _check("[payload] emitCpuLimits=false → limits.memory still written",
+           p_off[0]["limits"].get("memory"), "384Mi")
+
+    # Existing CR already carries a CPU limit; growOnly would normally keep the
+    # larger old value — the flag still drops it on the next sync.
+    cfg_grow = _base_config()
+    cfg_grow.prometheus_url = "http://prom:9090"
+    cfg_grow.resource.emit_cpu_limits = False
+    cfg_grow.grow_only = True
+    live = {"containers": {"app": {"requests": {"cpu": "100m", "memory": "64Mi"},
+                                   "limits": {"cpu": "4000m", "memory": "128Mi"}}}}
+    p_grow = _build(cfg_grow, state=live)
+    _check("[payload] existing CR limits.cpu dropped even under growOnly",
+           "cpu" in p_grow[0]["limits"], False)
+
+    # Webhook side: a CR without limits.cpu must not inject one. The limits
+    # sub-tree is replaced, so a CPU limit from the workload spec is dropped
+    # as well — that is the point of the flag.
+    ro = ResourceOverride(
+        namespace="ns", name="api", selector_match_labels={"app": "api"},
+        containers=(ContainerOverride(name="app", requests={"cpu": "200m", "memory": "128Mi"},
+                                      limits={"memory": "384Mi"}),),
+    )
+    pod = {"metadata": {"namespace": "ns", "annotations": {"x": "y"}},
+           "spec": {"containers": [{"name": "app", "resources": {
+               "requests": {"cpu": "1"}, "limits": {"cpu": "2", "memory": "1Gi"}}}]}}
+    ops = build_patches(pod, [ro])
+    lim_ops = [o for o in ops if o.path.endswith("/resources/limits")]
+    _check("[webhook] limits replaced with the CR's memory-only limits (no cpu injected)",
+           [o.value for o in lim_ops], [{"memory": "384Mi"}])
+
+    chart_dir = _chart_dir()
+    values_path = os.path.join(chart_dir, "values.yaml")
+    if os.path.isfile(values_path):
+        with open(values_path, encoding="utf-8") as fh:
+            _check("[chart] values.yaml documents @param config.emitCpuLimits",
+                   "@param config.emitCpuLimits " in fh.read(), True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -11402,6 +11504,7 @@ def main() -> int:
     section_public_readiness_chart_fixes()
     section_health_gate()
     section_grow_shrink_baseline_always_fetched()
+    section_emit_cpu_limits()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

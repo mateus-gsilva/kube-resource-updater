@@ -92,6 +92,7 @@
         "roundValues": { "type": ["string", "boolean"] },
         "growOnly": { "type": ["boolean", "string"] },
         "shrinkOnly": { "type": ["boolean", "string"] },
+        "emitCpuLimits": { "type": ["boolean", "string"] },
         "oomDetectionEnabled": { "type": ["boolean", "string"] },
         "oomBumpFactor": { "type": ["string", "number"] },
         "oomFloorEnabled": { "type": ["boolean", "string"] },

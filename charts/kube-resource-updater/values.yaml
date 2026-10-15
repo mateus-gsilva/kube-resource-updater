@@ -190,6 +190,14 @@ config:
   growOnly: false
   ## @param config.shrinkOnly Global shrink-only mode: only decrease resource values, never increase. Per-app annotation overrides.
   shrinkOnly: false
+  ## CPU limits. `false` never writes `limits.cpu` into a ResourceOverride and
+  ## drops one an existing CR carries on the next sync. The webhook replaces
+  ## each patched container's `limits` with the CR's, so the pod ends up with
+  ## no CPU limit (a CPU limit from the workload spec is removed too). Keep
+  ## `true` in namespaces whose ResourceQuota requires `limits.cpu`.
+  ## Per-workload override: `kube-resource-updater.emitCpuLimits: "false"`.
+  ## @param config.emitCpuLimits Write limits.cpu into the CR (false = requests-only CPU)
+  emitCpuLimits: true
 
   ## OOM-aware. Detects `OOMKilled` events on opted-in
   ## workloads at sync time (slow-path only — 's webhook

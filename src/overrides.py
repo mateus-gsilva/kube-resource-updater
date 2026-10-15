@@ -195,6 +195,8 @@ _KEY_SPEC: dict[str, tuple[str, str, Any]] = {
     # onto ResourceConfig via `apply`.
     "maxRestartsInWindow":   ("resource", "max_restarts_in_window",  _parse_int),
     "minSampleCoverage":     ("resource", "min_sample_coverage",     _parse_float),
+    # CPU-limit emission. False drops `limits.cpu` from the rendered CR.
+    "emitCpuLimits":         ("resource", "emit_cpu_limits",         _parse_bool),
 }
 
 # Public set of key names callers can introspect (e.g. for a `--list-keys`
