@@ -103,6 +103,7 @@ Run:
 #   section_rollout_replay_and_concurrency         autoRollout — replay suppression + concurrency limit
 #   section_git_push_rejection                     gitops push rejection — rebase + retry once, clean failure otherwise
 #   section_mr_work_branch                         config.mr.workBranch — configurable MR source branch
+#   section_github_status_wording                  GitHub provider status wording
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12132,6 +12133,23 @@ def section_mr_work_branch() -> None:
            provider.open_or_update_pr.call_args.kwargs.get("source_branch"), "kru/cluster-a")
 
 
+def section_github_status_wording() -> None:
+    """The GitHub provider's status wording matches what has been validated:
+    token (PAT) auth + the PR flow ran against a live repository; GitHub App
+    auth has only been mock-tested and stays alpha."""
+    _section("GitHub provider status wording")
+    import inspect
+    import src.git_provider as _gp
+    src_text = inspect.getsource(_gp)
+    _check("[wording] provider no longer called alpha as a whole",
+           "treat it as alpha" in src_text or "treat as alpha" in src_text, False)
+    _check("[wording] module states the PAT + PR flow was validated live",
+           "validated against a live GitHub repository" in (_gp.__doc__ or ""), True)
+    _check("[wording] GitHub App auth still flagged alpha",
+           "App" in (_gp.GitHubProvider.__doc__ or "") and "alpha" in (_gp.GitHubProvider.__doc__ or ""),
+           True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12493,6 +12511,7 @@ def main() -> int:
     section_rollout_replay_and_concurrency()
     section_git_push_rejection()
     section_mr_work_branch()
+    section_github_status_wording()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

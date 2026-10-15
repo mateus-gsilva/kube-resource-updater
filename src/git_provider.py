@@ -3,10 +3,11 @@ Git provider abstraction — GitLab (merge requests) + GitHub (pull requests).
 
 Defines `GitProvider` as a `typing.Protocol` so that callers depend only on
 the interface; `GitLabProvider` wraps the existing helpers in `src.writeback`
-and is the production-proven implementation. `GitHubProvider` is fully
-implemented and QA-tested via mock HTTP, selectable via config
-(`gitProvider` / URL auto-detection), but not yet validated against a live
-GitHub repository — treat it as alpha.
+and is the production-proven implementation. `GitHubProvider` is selectable
+via config (`gitProvider` / URL auto-detection); its token (PAT) auth and PR
+flow — branch push, PR open, idempotent re-open/adoption — have been
+validated against a live GitHub repository. GitHub App auth
+(`src/github_app_auth.py`) is mock-tested only and remains alpha.
 
 Architecture note (see docs/webhook-migration.md §write-back):
 - `GitLabProvider` is constructed once per sync run in `main.cmd_sync` from
@@ -348,9 +349,10 @@ class GitHubProvider:
     ``write_back_webhook_all`` / ``_commit_repo`` can use GitHub as a target
     without any changes to the call sites.
 
-    Status: fully implemented and QA-tested via mock HTTP; selected via the
-    ``gitProvider`` config field or repo-URL auto-detection. Not yet validated
-    against a live GitHub repository — treat as alpha.
+    Status: selected via the ``gitProvider`` config field or repo-URL
+    auto-detection. Token (PAT) auth and the PR flow are validated against a
+    live GitHub repository; GitHub App installation-token auth is mock-tested
+    only and remains alpha.
 
     Parameters
     ----------
