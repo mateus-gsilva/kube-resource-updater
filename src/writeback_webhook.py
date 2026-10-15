@@ -212,11 +212,14 @@ class PruneScope:
     long). Both the bare and the kind-prefixed CR name are listed, so a
     later collision rename never reads as "gone". Workloads with
     `skip: "true"` are left out on purpose: that is an explicit opt-out.
-    `blocked_namespaces`: discovery, a value query or the live-CR read
-    failed there this sync — nothing in them is deleted.
+    `blocked_namespaces`: discovery or a value query failed there this
+    sync — nothing in them is deleted.
     """
     keep: set[tuple[str, str]] = field(default_factory=set)
     blocked_namespaces: set[str] = field(default_factory=set)
+    # Live CRs could not be read here: no apply (no baseline for cooldown,
+    # growOnly / shrinkOnly, the change cap or previous-resources) and no prune.
+    unreadable_namespaces: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -324,7 +327,8 @@ def write_back_webhook_all(
             _log.warning("[direct] Prometheus queries failed in %s — no orphan deletion "
                          "there this sync", ", ".join(sorted(failed_queries)))
         scope = PruneScope(keep=set(scope.keep),
-                           blocked_namespaces=set(scope.blocked_namespaces) | failed_queries)
+                           blocked_namespaces=set(scope.blocked_namespaces) | failed_queries,
+                           unreadable_namespaces=set(scope.unreadable_namespaces))
         return _apply_direct(
             entries,
             state_lookup=oom_state_lookup or {},
@@ -566,6 +570,7 @@ def fetch_oom_floors(
 def fetch_oom_state(
     custom_objects_api,
     namespaces: list[str],
+    failed_namespaces: "set[str] | None" = None,
 ) -> dict[tuple[str, str], dict]:
     """Bundle apiserver-source CR state per workload.
 
@@ -598,6 +603,8 @@ def fetch_oom_state(
                 "skipping floor enforcement / dedupe / grow-shrink for this namespace.",
                 ns, exc,
             )
+            if failed_namespaces is not None:
+                failed_namespaces.add(ns)
             continue
         for cr in result.get("items") or []:
             meta = cr.get("metadata") or {}
@@ -2273,7 +2280,14 @@ def _apply_direct(
     applied: list[WebhookEntry] = []
     unchanged = 0
     failed = 0
+    unreadable = (prune_scope.unreadable_namespaces if prune_scope else set())
+    for ns in sorted({e.namespace for e in entries} & unreadable):
+        _log.warning("[direct] live ResourceOverrides in %s could not be read — skipping "
+                     "apply and orphan deletion there this sync (no baseline to compare "
+                     "against)", ns)
     for e in entries:
+        if e.namespace in unreadable:
+            continue
         live = state_lookup.get((e.namespace, e.cr_name))
         body = _direct_apply_body(e, live)
         if _direct_unchanged(body, live):
@@ -2357,7 +2371,7 @@ def _prune_orphan_crs(
     blocked: set[str] = set()
     if prune_scope is not None:
         keep |= prune_scope.keep
-        blocked = prune_scope.blocked_namespaces
+        blocked = prune_scope.blocked_namespaces | prune_scope.unreadable_namespaces
     try:
         listing = custom_objects_api.list_cluster_custom_object(
             CR_GROUP, CR_VERSION, CR_PLURAL,

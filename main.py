@@ -383,7 +383,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         # of those were disabled.
         from src.writeback_webhook import fetch_oom_state
         co_api = client.CustomObjectsApi()
-        oom_state_lookup = fetch_oom_state(co_api, opt_in_namespaces)
+        live_state_failed: set[str] = set()
+        oom_state_lookup = fetch_oom_state(co_api, opt_in_namespaces,
+                                           failed_namespaces=live_state_failed)
 
         if cfg.resource.oom_detection_enabled:
             from src.writeback_webhook import detect_oom_events
@@ -452,6 +454,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                 for name in (w.target_name, f"{w.target_kind.lower()}-{w.target_name}")
             },
             blocked_namespaces=set(discovery_failed),
+            unreadable_namespaces=set(live_state_failed),
         )
         if cfg.is_direct and discovery_failed:
             _log.warning("[direct] workload discovery incomplete in %s — no orphan deletion "

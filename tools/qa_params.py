@@ -106,6 +106,7 @@ Run:
 #   section_github_status_wording                  GitHub provider status wording
 #   section_dry_run_entry_keeps_committed_doc     per-workload dryRun — committed CR doc carried forward, not dropped
 #   section_direct_prune_partial_failure          direct mode — prune survives partial discovery / Prometheus failure
+#   section_direct_live_state_failure             direct mode — unreadable live CRs skip apply + prune for that namespace
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12344,6 +12345,76 @@ def section_direct_prune_partial_failure() -> None:
            bool(sc) and "ns-broken" in sc.blocked_namespaces, True)
 
 
+def section_direct_live_state_failure() -> None:
+    """When the live ResourceOverrides of a namespace cannot be read, direct
+    mode must not act on that namespace at all: without the live CR it would
+    lose the cooldown, the growOnly/shrinkOnly and change-cap baselines and
+    previous-resources, and force-apply fresh values over an OOM-bumped CR."""
+    _section("direct mode — unreadable live CRs skip apply + prune for that namespace")
+
+    import argparse as _argparse
+    from unittest.mock import MagicMock as _MM
+    import main as _main
+    from kubernetes.client.rest import ApiException
+    from src.config import Config as _Config, CrWritebackConfig as _CRW, ResourceConfig as _RC
+    from src.discovery import NamespaceTarget as _NsT
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    from src.writeback_webhook import PruneScope, WebhookEntry, _apply_direct, fetch_oom_state
+
+    co = _MM()
+
+    def _list(group, version, namespace, plural):
+        if namespace == "ns-bad":
+            raise ApiException(status=503)
+        return {"items": []}
+    co.list_namespaced_custom_object.side_effect = _list
+    failed: set = set()
+    fetch_oom_state(co, ["ns-ok", "ns-bad"], failed_namespaces=failed)
+    _check("[fetch] namespace whose CR list failed is reported", failed, {"ns-bad"})
+
+    def _e(ns, name):
+        return WebhookEntry(namespace=ns, cr_name=name, selector_labels={"app": name},
+                            containers=[{"name": "app", "requests": {"cpu": "1m"}}])
+    co2 = _MM()
+    co2.api_client.call_api.side_effect = lambda *a, **k: {"spec": k["body"]["spec"], "metadata": {}}
+    co2.list_cluster_custom_object.return_value = {"items": [
+        {"metadata": {"namespace": "ns-bad", "name": "orphan",
+                      "labels": {"app.kubernetes.io/managed-by": "kube-resource-updater"}}}]}
+    _apply_direct([_e("ns-ok", "a"), _e("ns-bad", "b")], state_lookup={}, global_dry_run=False,
+                  custom_objects_api=co2, core_v1_api=_MM(),
+                  prune_scope=PruneScope(unreadable_namespaces={"ns-bad"}))
+    applied = [c.args[2]["namespace"] for c in co2.api_client.call_api.call_args_list]
+    _check("[apply] CRs in a namespace with unreadable live state are not applied",
+           applied, ["ns-ok"])
+    _check("[prune] nothing deleted in a namespace with unreadable live state",
+           co2.delete_namespaced_custom_object.called, False)
+
+    cfg = _Config(gitlab_url="", gitlab_token="", gitlab_username="", git_author_name="k",
+                  git_author_email="k@e", dry_run=False, create_mr=True, min_cpu_limit_m=0,
+                  min_memory_limit_mi=0, prometheus_url="http://prom:9090", resource=_RC(),
+                  cr_writeback=_CRW(), writeback_mode="direct")
+    rec = _WRec(name="a", namespace="ns-bad", target_kind="Deployment", target_name="a",
+                containers=[_CRec(container_name="app")])
+    got = {}
+
+    def _fake_fetch(api, namespaces, failed_namespaces=None):
+        if failed_namespaces is not None:
+            failed_namespaces.add("ns-bad")
+        return {}
+    with patch("main.Config") as mock_cfg_cls, patch("main._log_module.setup"), \
+         patch("main.load_config"), \
+         patch("main.list_enabled_namespaces", return_value=[_NsT(name="ns-bad", annotations={})]), \
+         patch("main.list_workloads", return_value=[rec]), patch("main.client"), \
+         patch("src.writeback_webhook.fetch_oom_state", side_effect=_fake_fetch), \
+         patch("src.writeback_webhook.detect_oom_events", return_value={}), \
+         patch("main.write_back_webhook_all", side_effect=lambda **kw: got.update(kw)):
+        mock_cfg_cls.load.return_value = cfg
+        _main.cmd_sync(_argparse.Namespace(mr=None))
+    sc = got.get("prune_scope")
+    _check("[sync] live-state read failure flows into the direct-mode scope",
+           bool(sc) and sc.unreadable_namespaces, {"ns-bad"})
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12708,6 +12779,7 @@ def main() -> int:
     section_github_status_wording()
     section_dry_run_entry_keeps_committed_doc()
     section_direct_prune_partial_failure()
+    section_direct_live_state_failure()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 
