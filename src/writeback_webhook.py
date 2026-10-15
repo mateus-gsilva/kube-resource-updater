@@ -341,6 +341,7 @@ def write_back_webhook_all(
         mr_config=mr_config,
         auto_rollout_by_namespace=auto_rollout_by_namespace,
         held_report=held_report,
+        preserve_entries=dry_entries,
     )
     return results or None
 
@@ -2364,8 +2365,13 @@ def _commit_repo(
     mr_config: MrConfig | None = None,
     auto_rollout_by_namespace: "dict[str, bool] | None" = None,
     held_report: "list[HeldContainer] | None" = None,
+    preserve_entries: "list[WebhookEntry] | None" = None,
 ) -> list[tuple[str, list[str]]]:
     """Clone the repo, bucket-split entries by per-workload `create_mr`, push.
+
+    `preserve_entries` (per-workload dryRun) are never written, but their
+    committed docs are carried forward verbatim and their files are not
+    pruned — rebuilding a namespace file without them would delete their CRs.
 
     Returns a list of (result_url, [namespace, ...]) — at most two entries:
     one for the direct push (when any entry has `create_mr=False`) and one
@@ -2425,7 +2431,8 @@ def _commit_repo(
         # ONE read of the prior state, used by both passes. The same snapshot
         # also feeds the MR description and log deltas — those report against
         # the state before THIS sync started, regardless of bucket order.
-        old_docs = _read_old_docs(repo_dir, entries, path)
+        keep = list(preserve_entries or [])
+        old_docs = _read_old_docs(repo_dir, entries + keep, path)
 
         _run(["git", "-C", repo_dir, "config", "user.name",  git_author_name])
         _run(["git", "-C", repo_dir, "config", "user.email", git_author_email])
@@ -2442,9 +2449,9 @@ def _commit_repo(
                 entries=direct_entries,
                 path=path,
                 old_docs=old_docs,
-                preserve_entries=mr_entries,
+                preserve_entries=mr_entries + keep,
             )
-            deleted = _prune_orphan_files(repo_dir, entries, path) if not mr_entries else []
+            deleted = _prune_orphan_files(repo_dir, entries + keep, path) if not mr_entries else []
             _log_entry_deltas(direct_entries, old_docs, path)
 
             if changed or deleted:
@@ -2501,8 +2508,9 @@ def _commit_repo(
                 entries=entries,
                 path=path,
                 old_docs=old_docs,
+                preserve_entries=keep,
             )
-            deleted = _prune_orphan_files(repo_dir, entries, path)
+            deleted = _prune_orphan_files(repo_dir, entries + keep, path)
             _log_entry_deltas(mr_entries, old_docs, path)
 
             if changed or deleted:

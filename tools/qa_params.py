@@ -104,6 +104,7 @@ Run:
 #   section_git_push_rejection                     gitops push rejection — rebase + retry once, clean failure otherwise
 #   section_mr_work_branch                         config.mr.workBranch — configurable MR source branch
 #   section_github_status_wording                  GitHub provider status wording
+#   section_dry_run_entry_keeps_committed_doc     per-workload dryRun — committed CR doc carried forward, not dropped
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12150,6 +12151,69 @@ def section_github_status_wording() -> None:
            True)
 
 
+def section_dry_run_entry_keeps_committed_doc() -> None:
+    """A per-workload dryRun entry must not change git at all — including by
+    omission. The namespace file is rebuilt from the written entries, so a
+    dryRun workload's committed doc used to vanish from the file and the
+    GitOps engine then pruned its CR."""
+    _section("per-workload dryRun — committed CR doc carried forward, not dropped")
+
+    import subprocess as _sp
+    from src.git_provider import GitLabProvider as _GLP
+    from src.config import CrWritebackConfig as _CRW
+    from src.writeback_webhook import WebhookEntry, write_back_webhook_all
+
+    prior = (
+        "---\napiVersion: kube-resource-updater.io/v1\nkind: ResourceOverride\n"
+        "metadata:\n  name: api\n  namespace: ns\n  labels:\n"
+        "    app.kubernetes.io/managed-by: kube-resource-updater\n"
+        "spec:\n  selector:\n    matchLabels:\n      app: \"api\"\n  containers:\n"
+        "    - name: app\n      requests:\n        cpu: 100m\n"
+        "---\napiVersion: kube-resource-updater.io/v1\nkind: ResourceOverride\n"
+        "metadata:\n  name: worker\n  namespace: ns\n  labels:\n"
+        "    app.kubernetes.io/managed-by: kube-resource-updater\n"
+        "spec:\n  selector:\n    matchLabels:\n      app: \"worker\"\n  containers:\n"
+        "    - name: app\n      requests:\n        cpu: 300m\n"
+    )
+    written: dict = {}
+
+    def _run(cmd, allow_nonzero=False, timeout=None):
+        if cmd[:2] == ["git", "clone"]:
+            d = os.path.join(cmd[-1], "overrides")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "ns.resource-override.yaml"), "w") as fh:
+                fh.write(prior)
+        if "add" in cmd:
+            repo = cmd[2]
+            with open(os.path.join(repo, cmd[-1])) as fh:
+                written["content"] = fh.read()
+        if "rm" in cmd:
+            written["removed"] = cmd[-1]
+        return _sp.CompletedProcess(cmd, 1 if "--quiet" in cmd else 0, "", "")
+
+    def _e(name, cpu, dry):
+        return WebhookEntry(namespace="ns", cr_name=name, selector_labels={"app": name},
+                            containers=[{"name": "app", "requests": {"cpu": cpu}}],
+                            create_mr=False, dry_run=dry)
+
+    with patch("src.writeback_webhook._run", side_effect=_run), \
+         patch("src.writeback_webhook._build_entries",
+               return_value=([_e("api", "200m", False), _e("worker", "900m", True)], [])):
+        write_back_webhook_all(
+            workloads_with_configs=[(None, None)],
+            cr_writeback=_CRW(repo_url="https://git.example/r.git", path="overrides"),
+            provider=_GLP(gitlab_url="https://git.example", token="t", username=""),
+            git_author_name="k", git_author_email="k@e",
+        )
+    content = written.get("content", "")
+    _check("[dry-keep] written entry updated in the file", "cpu: 200m" in content, True)
+    _check("[dry-keep] dryRun workload's committed doc still in the file",
+           "name: worker" in content, True)
+    _check("[dry-keep] dryRun workload's doc carried verbatim (its new value not written)",
+           "cpu: 300m" in content and "cpu: 900m" not in content, True)
+    _check("[dry-keep] namespace file not pruned", written.get("removed"), None)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12512,6 +12576,7 @@ def main() -> int:
     section_git_push_rejection()
     section_mr_work_branch()
     section_github_status_wording()
+    section_dry_run_entry_keeps_committed_doc()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 
