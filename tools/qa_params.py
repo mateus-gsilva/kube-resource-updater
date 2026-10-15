@@ -111,6 +111,7 @@ Run:
 #   section_rollout_slot_release                  autoRollout — slot release (timeout + consecutive read errors)
 #   section_direct_foreign_ownership              direct mode — foreign spec ownership + tracking-only strip
 #   section_emit_cpu_limits_empty_limits          emitCpuLimits — explicit empty limits remove the pod's CPU limit
+#   section_restart_query_retry                   restart-count query — retry once, distinguish query-error from no-series
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12666,6 +12667,77 @@ def section_emit_cpu_limits_empty_limits() -> None:
            [o for o in ops if o["path"].endswith("/resources/limits")], [])
 
 
+def section_restart_query_retry() -> None:
+    """The crash-loop gate fails closed on a missing restart signal, so one
+    transient Prometheus error must not freeze every container: the restart
+    query retries once, and the hold says WHICH case it is — the query failed
+    vs the series is genuinely absent."""
+    _section("restart-count query — retry once, distinguish query-error from no-series")
+
+    import contextlib
+    from src import prometheus as _prom
+    from src.config import ResourceConfig
+    from src.health import assess_container
+
+    class _Resp:
+        def __init__(self, result):
+            self._r = result
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": {"result": self._r}}
+
+    def _seq(*items):
+        it = iter(items)
+
+        def _get(url, params=None, timeout=None):
+            v = next(it)
+            if isinstance(v, Exception):
+                raise v
+            return v
+        return _get
+
+    _prom._restart_cache.clear()
+    calls = _seq(ConnectionError("blip"), _Resp([{"value": [0, "2"]}]))
+    with patch("src.prometheus.requests.get", side_effect=calls) as g:
+        n = _prom.query_restart_count("http://p-retry", "ns", "c", "w", "3d")
+    _check("[retry] one transient error then success → value returned", n, 2)
+    _check("[retry] exactly one retry", g.call_count, 2)
+    _check("[retry] status ok", _prom.restart_signal_status("http://p-retry", "ns", "c", "w", "3d"), "ok")
+
+    _prom._restart_cache.clear()
+    with patch("src.prometheus.requests.get",
+               side_effect=_seq(ConnectionError("a"), ConnectionError("b"))) as g:
+        n = _prom.query_restart_count("http://p-retry", "ns", "c", "w", "3d")
+    _check("[retry] still failing after the retry → None (fail closed)", n, None)
+    _check("[retry] no retry storm (2 calls total)", g.call_count, 2)
+    _check("[retry] status query-error",
+           _prom.restart_signal_status("http://p-retry", "ns", "c", "w", "3d"), "query-error")
+
+    _prom._restart_cache.clear()
+    with patch("src.prometheus.requests.get", side_effect=_seq(_Resp([]))) as g:
+        n = _prom.query_restart_count("http://p-retry", "ns", "c", "w", "3d")
+    _check("[no-series] empty result is not retried", (n, g.call_count), (None, 1))
+    _check("[no-series] status no-series",
+           _prom.restart_signal_status("http://p-retry", "ns", "c", "w", "3d"), "no-series")
+
+    rc = ResourceConfig()
+
+    def _assess(status):
+        with contextlib.ExitStack() as st:
+            st.enter_context(patch("src.health.query_restart_count", return_value=None))
+            st.enter_context(patch("src.health.restart_signal_status", return_value=status))
+            st.enter_context(patch("src.health.query_cpu_sample_count", return_value=4320))
+            st.enter_context(patch("src.health.query_mem_sample_count", return_value=2304))
+            return assess_container("http://p", "ns", "c", "w", rc)
+    v_err, v_none = _assess("query-error"), _assess("no-series")
+    _check("[detail] query error → still held (fail closed)", v_err.held, True)
+    _check("[detail] query error named in the hold detail", "query failed" in v_err.detail, True)
+    _check("[detail] absent series named in the hold detail", "no data" in v_none.detail, True)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -13035,6 +13107,7 @@ def main() -> int:
     section_rollout_slot_release()
     section_direct_foreign_ownership()
     section_emit_cpu_limits_empty_limits()
+    section_restart_query_retry()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 
