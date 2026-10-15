@@ -101,6 +101,7 @@ Run:
 #   section_writeback_direct_mode                  writebackMode=direct — server-side apply + audit + orphan delete
 #   section_cronjob_suspend                        cronjob.suspend — kill switch
 #   section_rollout_replay_and_concurrency         autoRollout — replay suppression + concurrency limit
+#   section_git_push_rejection                     gitops push rejection — rebase + retry once, clean failure otherwise
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -11971,6 +11972,106 @@ def section_rollout_replay_and_concurrency() -> None:
            "WEBHOOK_AUTO_ROLLOUT_MIN_INTERVAL_SECONDS" in r.stdout, True)
 
 
+def section_git_push_rejection() -> None:
+    """gitops push rejection: a non-fast-forward is rebased and retried once;
+    any other rejection (protected branch, permissions) becomes one clear,
+    token-free error and a non-zero exit instead of a raw traceback that
+    crash-loops the Job."""
+    _section("gitops push rejection — rebase + retry once, clean failure otherwise")
+
+    import argparse as _argparse
+    import subprocess as _sp
+    import main as _main
+    from src.writeback_webhook import GitPushError, _push_with_rebase
+
+    def _cp(rc, err=""):
+        return _sp.CompletedProcess(args=[], returncode=rc, stdout="", stderr=err)
+
+    nff = (" ! [rejected]        main -> main (fetch first)\n"
+           "error: failed to push some refs to 'https://oauth2:s3cret@git.example/r.git'\n"
+           "hint: Updates were rejected because the remote contains work that you do\n")
+    calls: list = []
+
+    def _fake(seq):
+        it = iter(seq)
+
+        def _run(cmd, allow_nonzero=False, timeout=None):
+            calls.append(cmd[3:] if cmd[:2] == ["git", "-C"] else cmd)
+            return next(it)
+        return _run
+
+    calls.clear()
+    with patch("src.writeback_webhook._run", side_effect=_fake([_cp(1, nff), _cp(0), _cp(0), _cp(0)])):
+        _push_with_rebase("/repo", "main")
+    _check("[push] non-fast-forward → fetch, rebase onto the remote branch, push again",
+           calls, [["push", "origin", "main"], ["fetch", "origin", "main"],
+                   ["rebase", "origin/main"], ["push", "origin", "main"]])
+
+    calls.clear()
+    raised = None
+    with patch("src.writeback_webhook._run",
+               side_effect=_fake([_cp(1, nff), _cp(0), _cp(0), _cp(1, nff)])):
+        try:
+            _push_with_rebase("/repo", "main")
+        except GitPushError as exc:
+            raised = exc
+    _check("[push] second rejection after one rebase → GitPushError (bounded, no loop)",
+           raised is not None and len(calls), 4)
+
+    calls.clear()
+    raised = None
+    with patch("src.writeback_webhook._run",
+               side_effect=_fake([_cp(1, nff), _cp(0), _cp(1, "CONFLICT (content)"), _cp(0)])):
+        try:
+            _push_with_rebase("/repo", "main")
+        except GitPushError as exc:
+            raised = exc
+    _check("[push] rebase conflict → rebase aborted, GitPushError",
+           (raised is not None, calls[-1]), (True, ["rebase", "--abort"]))
+
+    prot = ("remote: GitLab: You are not allowed to push code to protected branches on this "
+            "project.\nTo https://oauth2:s3cret@git.example/r.git\n ! [remote rejected] main -> "
+            "main (pre-receive hook declined)\n")
+    calls.clear()
+    raised = None
+    with patch("src.writeback_webhook._run", side_effect=_fake([_cp(1, prot)])):
+        try:
+            _push_with_rebase("/repo", "main")
+        except GitPushError as exc:
+            raised = exc
+    _check("[push] protected branch → no rebase attempt", calls, [["push", "origin", "main"]])
+    msg = str(raised or "")
+    _check("[push] error names the branch and the likely fix",
+           "main" in msg and "createMr" in msg and "permission" in msg.lower(), True)
+    _check("[push] error never carries the token", "s3cret" in msg, False)
+
+    # cmd_sync turns the error into exit code 1, no traceback.
+    from src.config import Config as _Config, CrWritebackConfig as _CRW, ResourceConfig as _RC
+    from src.discovery import NamespaceTarget as _NsT
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    cfg = _Config(gitlab_url="", gitlab_token="", gitlab_username="",
+                  git_author_name="kru", git_author_email="kru@example", dry_run=False,
+                  create_mr=False, min_cpu_limit_m=0, min_memory_limit_mi=0,
+                  prometheus_url="http://prom:9090", resource=_RC(),
+                  cr_writeback=_CRW(repo_url="https://x/r.git", path="o"))
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                containers=[_CRec(container_name="app")])
+    with patch("main.Config") as mock_cfg_cls, patch("main._log_module.setup"), \
+         patch("main.load_config"), patch("main.log_git_credentials_state"), \
+         patch("main.list_enabled_namespaces", return_value=[_NsT(name="ns", annotations={})]), \
+         patch("main.list_workloads", return_value=[rec]), patch("main.client"), \
+         patch("main.build_provider"), \
+         patch("src.writeback_webhook.fetch_oom_state", return_value={}), \
+         patch("src.writeback_webhook.detect_oom_events", return_value={}), \
+         patch("main.write_back_webhook_all", side_effect=GitPushError("push rejected")):
+        mock_cfg_cls.load.return_value = cfg
+        try:
+            rc = _main.cmd_sync(_argparse.Namespace(mr=None))
+        except Exception as exc:  # noqa: BLE001
+            rc = f"raised {type(exc).__name__}"
+    _check("[push] cmd_sync returns 1 on a push failure instead of raising", rc, 1)
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12330,6 +12431,7 @@ def main() -> int:
     section_writeback_direct_mode()
     section_cronjob_suspend()
     section_rollout_replay_and_concurrency()
+    section_git_push_rejection()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

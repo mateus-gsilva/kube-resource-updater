@@ -2456,7 +2456,7 @@ def _commit_repo(
                 if _run(["git", "-C", repo_dir, "diff", "--cached", "--quiet"], allow_nonzero=True).returncode:
                     commit_msg = _commit_message(direct_entries, deleted)
                     _run(["git", "-C", repo_dir, "commit", "-m", commit_msg])
-                    _run(["git", "-C", repo_dir, "push", "origin", branch])
+                    _push_with_rebase(repo_dir, branch)
                     direct_pushed = True
                     ns_list = sorted({e.namespace for e in direct_entries})
                     # Blank between the per-namespace trees and this
@@ -2514,9 +2514,11 @@ def _commit_repo(
                 if _run(["git", "-C", repo_dir, "diff", "--cached", "--quiet"], allow_nonzero=True).returncode:
                     commit_msg = _commit_message(mr_entries, deleted)
                     _run(["git", "-C", repo_dir, "commit", "-m", commit_msg])
-                    _run(["git", "-c", "push.useForceWithLease=false",
-                          "-C", repo_dir, "push", "--force",
-                          "--set-upstream", "origin", work_branch])
+                    # Force-push of the tool's own work branch: a rejection
+                    # here is never a race (no rebase), only a permission or
+                    # protection problem — surfaced the same clean way.
+                    _push_with_rebase(repo_dir, work_branch, allow_rebase=False,
+                                      extra_args=["--force", "--set-upstream"])
 
                     assignee_ids = provider.resolve_users(mr_config.assignees if mr_config else [])
                     reviewer_ids = provider.resolve_users(mr_config.reviewers if mr_config else [])
@@ -2967,6 +2969,60 @@ def _count_container_rows(body: str) -> int:
         if line.startswith("| `") and line.count("|") >= 7:
             n += 1
     return n
+
+
+# --------------------------------------------------------------------------- #
+# Push with bounded rebase                                                     #
+# --------------------------------------------------------------------------- #
+
+class GitPushError(RuntimeError):
+    """A push the remote rejected for good. The message is operator-facing
+    and already redacted — callers log it and exit non-zero, no traceback."""
+
+
+# git's wording for "the remote moved on": `(fetch first)` / `non-fast-forward`.
+_NON_FAST_FORWARD_RE = re.compile(r"fetch first|non-fast-forward|tip of your current branch is behind")
+
+
+def _push_with_rebase(repo_dir: str, branch: str, *, extra_args: list[str] | None = None,
+                      allow_rebase: bool = True) -> None:
+    """`git push origin <branch>`; on a non-fast-forward, rebase once and retry.
+
+    Another writer (a second cluster sharing the repo, a human) can land a
+    commit on the target branch between our clone and our push. One
+    fetch + rebase + push resolves that; a second rejection, a rebase
+    conflict or any other rejection (protected branch, missing permission)
+    raises `GitPushError` with a redacted, actionable message.
+    """
+    cmd = ["git", "-C", repo_dir, "push", *(extra_args or []), "origin", branch]
+    res = _run(cmd, allow_nonzero=True)
+    if res.returncode == 0:
+        return
+    stderr = res.stderr or ""
+    if allow_rebase and _NON_FAST_FORWARD_RE.search(stderr):
+        _log.warning("[push] %s moved on since the clone — rebasing onto origin/%s "
+                     "and retrying once", branch, branch)
+        fetch = _run(["git", "-C", repo_dir, "fetch", "origin", branch], allow_nonzero=True)
+        rebase = _run(["git", "-C", repo_dir, "rebase", f"origin/{branch}"], allow_nonzero=True) \
+            if fetch.returncode == 0 else fetch
+        if rebase.returncode != 0:
+            _run(["git", "-C", repo_dir, "rebase", "--abort"], allow_nonzero=True)
+            raise GitPushError(
+                f"push to {branch!r} was rejected (remote has new commits) and rebasing onto "
+                f"origin/{branch} failed — someone else changed the same CR files. The next "
+                f"sync re-renders from the new tip. git said: "
+                f"{_redact_auth((rebase.stderr or '').strip())[:500]}"
+            )
+        res = _run(cmd, allow_nonzero=True)
+        if res.returncode == 0:
+            return
+        stderr = res.stderr or ""
+    raise GitPushError(
+        f"push to branch {branch!r} was rejected by the remote. If the branch is protected "
+        f"or the token lacks write permission, grant the git credentials push permission "
+        f"on {branch!r}, or set config.createMr=true so changes go through a merge/pull "
+        f"request. git said: {_redact_auth(stderr.strip())[:500]}"
+    )
 
 
 # --------------------------------------------------------------------------- #

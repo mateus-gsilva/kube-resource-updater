@@ -25,6 +25,7 @@ Environment variables:
 """
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,7 +39,7 @@ from src.overrides import is_workload_skipped, resolve_for_workload, resolve_ski
 from src.prometheus import check_connectivity
 from src.workload import WorkloadRecommendation, list_workloads
 from src.writeback import log_git_credentials_state
-from src.writeback_webhook import write_back_webhook_all
+from src.writeback_webhook import GitPushError, write_back_webhook_all
 from src.git_provider import build_provider
 
 _log = _log_module.get(__name__)
@@ -447,25 +448,36 @@ def cmd_sync(args: argparse.Namespace) -> int:
             installation_id=cfg.git_installation_id,
             app_private_key=cfg.git_app_private_key,
         )
-        results = write_back_webhook_all(
-            workloads_with_configs=pairs,
-            cr_writeback=cfg.cr_writeback,
-            provider=provider,
-            git_author_name=cfg.git_author_name,
-            git_author_email=cfg.git_author_email,
-            dry_run=cfg.dry_run,
-            mr_config=cfg.mr,
-            oom_state_lookup=oom_state_lookup,
-            oom_events_lookup=oom_events_lookup,
-            oom_eligibility_lookup=oom_eligibility_lookup,
-            oom_floor_enabled_lookup=oom_floor_enabled_lookup,
-            oom_floor_reset_lookup=oom_floor_reset_lookup,
-            health_gate_lookup=health_gate_lookup,
-            auto_rollout_by_namespace=auto_rollout_by_namespace,
-            writeback_mode=cfg.writeback_mode,
-            custom_objects_api=co_api,
-            core_v1_api=client.CoreV1Api() if cfg.is_direct else None,
-        )
+        try:
+            results = write_back_webhook_all(
+                workloads_with_configs=pairs,
+                cr_writeback=cfg.cr_writeback,
+                provider=provider,
+                git_author_name=cfg.git_author_name,
+                git_author_email=cfg.git_author_email,
+                dry_run=cfg.dry_run,
+                mr_config=cfg.mr,
+                oom_state_lookup=oom_state_lookup,
+                oom_events_lookup=oom_events_lookup,
+                oom_eligibility_lookup=oom_eligibility_lookup,
+                oom_floor_enabled_lookup=oom_floor_enabled_lookup,
+                oom_floor_reset_lookup=oom_floor_reset_lookup,
+                health_gate_lookup=health_gate_lookup,
+                auto_rollout_by_namespace=auto_rollout_by_namespace,
+                writeback_mode=cfg.writeback_mode,
+                custom_objects_api=co_api,
+                core_v1_api=client.CoreV1Api() if cfg.is_direct else None,
+            )
+        except GitPushError as exc:
+            _log.error("[push] %s", exc)
+            return 1
+        except subprocess.CalledProcessError as exc:
+            # `_run` already logged the redacted command + output; the
+            # exception's own argv was scrubbed too. Exit cleanly instead of
+            # crash-looping the Job with a traceback.
+            _log.error("[git] git command failed (exit %s) — see the error above; "
+                       "nothing was pushed", exc.returncode)
+            return 1
 
     if not results:
         return 0
