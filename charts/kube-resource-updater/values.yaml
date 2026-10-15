@@ -52,9 +52,9 @@ image:
 
 ## @section CronJob parameters
 cronjob:
-  ## @param cronjob.enabled Deploy the sync CronJob and its RBAC. Set to false on clusters that
-  ## only need the admission webhook (the webhook is the per-cluster runtime; the CronJob runs
-  ## in a single "control" cluster that has access to ArgoCD Applications and the GitLab token).
+  ## @param cronjob.enabled Deploy the sync CronJob and its RBAC. Each cluster runs its own sync
+  ## (it reads that cluster's workloads, Prometheus and live CRs). Set to false only for a
+  ## webhook-only install, e.g. while CRs are still managed by hand.
   enabled: true
   ## @param cronjob.suspend Kill switch — suspend the sync CronJob (no new runs; the webhook keeps applying existing CRs)
   suspend: false
@@ -362,11 +362,11 @@ config:
   ## — one file per Namespace, with multiple workloads of the same Namespace
   ## stored as separate YAML documents in that file.
   crWriteback:
-    ## @param config.crWriteback.repoUrl Git repo URL where ResourceOverride CRs are committed (REQUIRED)
+    ## @param config.crWriteback.repoUrl Git repo URL where ResourceOverride CRs are committed (REQUIRED in gitops mode)
     repoUrl: ""
     ## @param config.crWriteback.branch Branch within crWriteback.repoUrl (defaults to "main")
     branch: "main"
-    ## @param config.crWriteback.path In-repo directory where files land (REQUIRED)
+    ## @param config.crWriteback.path In-repo directory where files land (REQUIRED in gitops mode)
     path: ""
   ## Prometheus URL — REQUIRED (auto-discovery removed).
   ##

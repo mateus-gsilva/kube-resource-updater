@@ -121,7 +121,8 @@ Opt-in is by Namespace annotation `kube-resource-updater.enabled: "true"`. Every
 
 | Name | Description | Value |
 | ---- | ----------- | ----- |
-| `cronjob.enabled` | Deploy the sync CronJob and its RBAC. Set to false on clusters that only need the admission webhook (the webhook is the per-cluster runtime; the CronJob runs in a single "control" cluster that has access to ArgoCD Applications and the GitLab token). | `true` |
+| `cronjob.enabled` | Deploy the sync CronJob and its RBAC. Each cluster runs its own sync (it reads that cluster's workloads, Prometheus and live CRs). Set to false only for a webhook-only install. | `true` |
+| `cronjob.suspend` | Kill switch — suspend the sync CronJob (no new runs; the webhook keeps applying existing CRs) | `false` |
 | `cronjob.schedule` | Cron schedule expression | `0 */6 * * *` |
 | `cronjob.timeZone` | Timezone (requires k8s >= 1.27) | `UTC` |
 | `cronjob.concurrencyPolicy` | Forbid prevents overlapping runs | `Forbid` |
@@ -139,6 +140,7 @@ Opt-in is by Namespace annotation `kube-resource-updater.enabled: "true"`. Every
 
 | Name | Description | Value |
 | ---- | ----------- | ----- |
+| `config.writebackMode` | Write-back mode: "gitops" (commit to git) \| "direct" (apply to the cluster API) | `gitops` |
 | `config.gitProvider` | Git provider override: "" (auto-detect from repoUrl) \| "auto" \| "gitlab" \| "github" When empty, the tool infers the provider from the repoUrl host (github.com / github.* → GitHub; everything else → GitLab). Override here to force a specific provider or to wire GitHub Enterprise Server alongside a custom gitApiUrl. | `""` |
 | `config.dryRun` | Skip git/MR operations (log only) | `false` |
 | `config.createMr` | Open a GitLab MR (default) — false = direct push to crWriteback.branch | `true` |
@@ -168,6 +170,9 @@ Opt-in is by Namespace annotation `kube-resource-updater.enabled: "true"`. Every
 | `config.roundValues` | Round all computed resource values up to nearest order-of-magnitude step (101→200, 11→20) | `false` |
 | `config.growOnly` | Global grow-only mode: only increase resource values, never decrease. Per-app annotation overrides. | `false` |
 | `config.shrinkOnly` | Global shrink-only mode: only decrease resource values, never increase. Per-app annotation overrides. | `false` |
+| `config.emitCpuLimits` | Write limits.cpu into the CR (false = requests-only CPU) | `true` |
+| `config.maxChangePercent` | Max % a value may move per sync vs its current value (0 = disabled) | `0` |
+| `config.cooldownHours` | Minimum hours between non-OOM changes of one workload (0 = disabled) | `0` |
 | `config.oomDetectionEnabled` | Detect OOMKilled and bump memory at sync time | `true` |
 | `config.oomBumpFactor` | Multiplier on the limit at OOM time (1.5 = +50% headroom). Bumped value also stamped as the CR's `oom-floor` annotation. | `1.5` |
 | `config.oomFloorEnabled` | Make OOM bumps sticky via `oom-floor.<container>` annotation | `true` |
@@ -175,9 +180,9 @@ Opt-in is by Namespace annotation `kube-resource-updater.enabled: "true"`. Every
 | `config.maxRestartsInWindow` | Restarts tolerated inside the widest request window before holding (0 = gate off) | `3` |
 | `config.minSampleCoverage` | Fraction of the window's evaluation points that must carry data before a percentile is trusted (0 = gate off) | `0.25` |
 | `config.skipContainers` | Comma-separated container names to skip cluster-wide | `""` |
-| `config.crWriteback.repoUrl` | Git repo URL where ResourceOverride CRs are committed (REQUIRED) | `""` |
+| `config.crWriteback.repoUrl` | Git repo URL where ResourceOverride CRs are committed (REQUIRED in gitops mode) | `""` |
 | `config.crWriteback.branch` | Branch within crWriteback.repoUrl (defaults to "main") | `main` |
-| `config.crWriteback.path` | In-repo directory where files land (REQUIRED) | `""` |
+| `config.crWriteback.path` | In-repo directory where files land (REQUIRED in gitops mode) | `""` |
 | `config.prometheusUrl` | Prometheus URL (REQUIRED when cronjob.enabled) | `""` |
 | `config.gitlabUsername` | DEPRECATED — use git.username instead. Kept as a config-file alias so existing ConfigMaps that carry `gitlabUsername:` continue to work without operator action. The Python side reads git.username first, falls back to gitlabUsername. | `""` |
 | `config.mr.assignees` | Comma-separated GitLab usernames to assign on MR open | `""` |
@@ -185,6 +190,7 @@ Opt-in is by Namespace annotation `kube-resource-updater.enabled: "true"`. Every
 | `config.mr.labels` | Comma-separated MR labels | `""` |
 | `config.mr.squash` | Set MR's `Squash commits when merging` flag | `false` |
 | `config.mr.removeSourceBranch` | Delete source branch after merge (kept true for the historical default) | `true` |
+| `config.mr.workBranch` | Source branch the tool force-pushes and opens the MR/PR from. Use one per cluster when several clusters share one gitops repo. Must differ from crWriteback.branch. | `resource-updater/sync` |
 
 ### Git credentials
 
@@ -301,6 +307,8 @@ Opt-in is by Namespace annotation `kube-resource-updater.enabled: "true"`. Every
 | `webhook.validating.enabled` | Reject CR creates/updates whose selector + container set overlaps an existing CR in the same namespace. | `true` |
 | `webhook.autoRollout.enabled` | Cluster-wide default for the auto-rollout hierarchy. Per-workload / per-namespace annotations override this. | `false` |
 | `webhook.autoRollout.debounceSeconds` | How long to wait after the last CR change before patching the workload's PodTemplate. | `30` |
+| `webhook.autoRollout.maxConcurrent` | Max workload rollouts in progress at once (0 = unlimited) | `1` |
+| `webhook.autoRollout.minIntervalSeconds` | Minimum seconds between two restarts (0 = no spacing) | `0` |
 | `webhook.status.enabled` | Write CR.status.appliedToPodCount + lastAppliedAt; controls the RBAC verb on resourceoverrides/status too. | `false` |
 | `webhook.status.flushIntervalSeconds` | Coalesce window for the status writer (seconds). | `30` |
 | `webhook.metrics.serviceMonitor.enabled` | Create a ServiceMonitor for /metrics | `false` |

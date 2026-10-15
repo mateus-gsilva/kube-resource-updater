@@ -4,6 +4,71 @@ Release history for `kube-resource-updater`. Pending work lives in [ROADMAP.md](
 
 ---
 
+## 0.2.0 — Direct write-back and change guardrails (2026-10-15)
+
+**Added — `config.writebackMode: direct`.** The sync can server-side apply the
+rendered `ResourceOverride`s straight to the cluster API (field manager
+`kube-resource-updater`) instead of committing them to git. No repository, token
+or author identity is needed. Tool-owned CRs the sync no longer renders are
+deleted, scoped exactly like gitops pruning (only CRs labelled
+`app.kubernetes.io/managed-by: kube-resource-updater`; nothing is deleted when
+the sync produced no CRs, the listing fails, or the workload is in `dryRun`).
+The audit trail moves onto the CR: `kube-resource-updater.io/last-changed` and
+`kube-resource-updater.io/previous-resources` annotations plus a
+`ResourcesUpdated` Event per change. Argo CD tracking metadata is stripped from
+live CRs (every `argocd.argoproj.io/*` annotation; `app.kubernetes.io/instance`
+only when an `argocd*` field manager owns it). The chart grants the extra RBAC
+(create/patch/delete on `resourceoverrides`, create/patch on `events`) only in
+this mode. Default stays `gitops`.
+
+**Added — guardrails (all off by default, all overridable per namespace /
+workload):**
+
+- `config.maxChangePercent` — each request/limit moves at most N% of its current
+  value per sync (live CR, else pod-template value, else no clamp). OOM-driven
+  memory growth is exempt upward but still respects `maxMemoryLimitMi`.
+- `config.cooldownHours` — a workload changed less than N hours ago keeps its
+  values; a fresh OOM still bumps memory. Reads the new `last-changed`
+  annotation, which gitops-mode CRs now carry too.
+- `config.emitCpuLimits: false` — requests-only CPU: `limits.cpu` is never
+  written and is dropped from existing CRs.
+- `cronjob.suspend` — chart kill switch for the sync CronJob.
+- `webhook.autoRollout.maxConcurrent` (default `1`) and `minIntervalSeconds`
+  (default `0`) — due restarts queue instead of firing together; a restart
+  counts until its rollout completes (or 10 minutes).
+- `config.mr.workBranch` — configurable MR/PR source branch, so several
+  clusters can share one gitops repo.
+
+**Changed — autoRollout ignores replays.** A restart fires only when a CR's
+resources differ from the last state the webhook knew; watch replays and the
+re-list after a reconnect seed that state instead of restarting workloads.
+
+**Changed — the crash-loop gate fails closed.** Without
+`kube_pod_container_status_restarts_total` (no kube-state-metrics, or a failed
+query) containers are held with reason `no-restart-signal` instead of being
+sized from samples the gate cannot vouch for. **Upgrade note:** clusters without
+kube-state-metrics must set `config.maxRestartsInWindow: 0` (or
+`healthGateEnabled: false`) to keep recommendations moving.
+
+**Fixed:**
+
+- growOnly / shrinkOnly silently did nothing when both `oomDetectionEnabled` and
+  `healthGateEnabled` were off — the live CR baseline was never fetched, and the
+  read RBAC was tied to OOM detection. Both are now unconditional.
+- A push rejected because the branch moved on is rebased and retried once; any
+  other push failure (protected branch, permissions) exits 1 with one redacted
+  error instead of a traceback that crash-looped the Job.
+- A per-workload `dryRun` workload's committed CR doc was dropped from the
+  rebuilt namespace file, so the GitOps engine pruned its CR.
+- Docs: one install per cluster (the "central multi-cluster CronJob" wording was
+  stale); orphan-cleanup scope; GitHub provider status (token auth + PR flow
+  validated, GitHub App auth still alpha).
+
+**Upgrade notes:** chart and app version 0.2.0. Defaults keep 0.1.5 behaviour
+except the fail-closed crash-loop gate above and `autoRollout.maxConcurrent: 1`
+(set `0` for the previous unlimited restarts). CRs gain the two audit
+annotations on their next change.
+
 ## 0.1.5 — Sample-quality gates: don't size from an untrustworthy window (2026-08-01)
 
 **Fixed — recommendations computed from unhealthy pods.**
