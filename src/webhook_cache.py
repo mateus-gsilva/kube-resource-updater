@@ -71,6 +71,9 @@ class ContainerOverride:
     name: str
     requests: dict[str, str]   # {"cpu": "100m", "memory": "256Mi"}
     limits: dict[str, str]
+    # True when the CR spells `limits` out, even as `{}` — the webhook then
+    # owns the pod's limits sub-tree (an empty map removes it).
+    limits_set: bool = False
 
 
 @dataclass(frozen=True)
@@ -426,6 +429,7 @@ def _parse_container(c: dict) -> ContainerOverride:
         name=c["name"],
         requests=_string_resources(c.get("requests") or {}),
         limits=_string_resources(c.get("limits") or {}),
+        limits_set="limits" in c and c.get("limits") is not None,
     )
 
 

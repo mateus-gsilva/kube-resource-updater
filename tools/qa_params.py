@@ -110,6 +110,7 @@ Run:
 #   section_rollout_tick_resilience               autoRollout — tick loop survives non-ApiException errors
 #   section_rollout_slot_release                  autoRollout — slot release (timeout + consecutive read errors)
 #   section_direct_foreign_ownership              direct mode — foreign spec ownership + tracking-only strip
+#   section_emit_cpu_limits_empty_limits          emitCpuLimits — explicit empty limits remove the pod's CPU limit
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -12616,6 +12617,55 @@ def section_direct_foreign_ownership() -> None:
            anns, ["argocd.argoproj.io/tracking-id"])
 
 
+def section_emit_cpu_limits_empty_limits() -> None:
+    """emitCpuLimits=false when the CR ends up with NO limits at all (e.g. no
+    memory data): the CR carries an explicit `limits: {}` and the webhook
+    removes the pod's limits sub-tree, so a template `limits.cpu` cannot
+    survive. A CR that simply omits `limits` (hand-written, requests-only)
+    still leaves the pod's limits alone."""
+    _section("emitCpuLimits — explicit empty limits remove the pod's CPU limit")
+
+    from types import SimpleNamespace
+    from src.webhook_cache import _parse
+    from src.webhook_patch import build_patches, patches_to_jsonpatch
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    from src.writeback_webhook import WebhookEntry, _build_containers_payload, _render_cr_doc
+
+    cfg = _base_config()
+    cfg.prometheus_url = "http://prom:9090"
+    cfg.resource.emit_cpu_limits = False
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                containers=[_CRec(container_name="app")])
+    cpu_only = SimpleNamespace(cpu_request_m=200, memory_request_bytes=None,
+                               cpu_limit_m=800, memory_limit_bytes=None)
+    with _no_health_gate(), patch("src.writeback_webhook._query_prom_values", return_value=cpu_only):
+        payload, _a, _h = _build_containers_payload(rec, cfg, oom_state=None, oom_events={},
+                                                   oom_eligible=False, health_gate_enabled=False)
+    _check("[payload] emitCpuLimits=false + no other limit → explicit empty limits",
+           payload[0].get("limits", "ABSENT") if payload else "NO PAYLOAD", {})
+    doc = _render_cr_doc(WebhookEntry(namespace="ns", cr_name="api", selector_labels={"app": "api"},
+                                      containers=payload), None)
+    _check("[render] rendered CR keeps `limits: {}`",
+           doc["spec"]["containers"][0].get("limits", "ABSENT"), {})
+
+    def _ro(container):
+        return _parse({"metadata": {"namespace": "ns", "name": "api"},
+                       "spec": {"selector": {"matchLabels": {"app": "api"}},
+                                "containers": [container]}})
+    pod = {"metadata": {"namespace": "ns", "annotations": {"x": "y"}},
+           "spec": {"containers": [{"name": "app", "resources": {
+               "requests": {"cpu": "1"}, "limits": {"cpu": "2"}}}]}}
+    ops = patches_to_jsonpatch(build_patches(pod, [_ro(
+        {"name": "app", "requests": {"cpu": "200m"}, "limits": {}})]))
+    _check("[webhook] explicit empty limits → limits sub-tree removed",
+           [o for o in ops if o["path"].endswith("/resources/limits")],
+           [{"op": "remove", "path": "/spec/containers/0/resources/limits"}])
+    ops = patches_to_jsonpatch(build_patches(pod, [_ro(
+        {"name": "app", "requests": {"cpu": "200m"}})]))
+    _check("[webhook] CR without a limits key (requests-only) leaves pod limits alone",
+           [o for o in ops if o["path"].endswith("/resources/limits")], [])
+
+
 def section_overrides_unit_file() -> None:
     """Bridges tools/test_overrides.py (the overrides unit-test file) into the
     single canonical entrypoint. Its PASS/FAIL lines print inline above; one
@@ -12984,6 +13034,7 @@ def main() -> int:
     section_rollout_tick_resilience()
     section_rollout_slot_release()
     section_direct_foreign_ownership()
+    section_emit_cpu_limits_empty_limits()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

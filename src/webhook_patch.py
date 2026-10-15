@@ -33,7 +33,7 @@ _CONTAINER_PATHS = (
 
 @dataclass(frozen=True)
 class PatchOp:
-    op: str         # "add" | "replace"
+    op: str         # "add" | "replace" | "remove"
     path: str       # JSONPointer e.g. /spec/containers/0/resources/requests/cpu
     value: object
 
@@ -72,6 +72,7 @@ def build_patches(pod: dict, overrides: list[ResourceOverride]) -> list[PatchOp]
             by_name[c.name] = {
                 "requests": dict(c.requests),
                 "limits": dict(c.limits),
+                "limits_set": c.limits_set,
                 "source_cr": f"{ro.namespace}/{ro.name}",
             }
 
@@ -133,7 +134,10 @@ def _patch_container(container: dict, idx: int, base_path: str, target: dict) ->
 
     requests = target["requests"]
     limits = target["limits"]
-    if not requests and not limits:
+    # `limits: {}` spelled out in the CR (emitCpuLimits=false with no other
+    # limit) means "this container gets no limits" — remove the sub-tree.
+    clear_limits = bool(target.get("limits_set")) and not limits
+    if not requests and not limits and not clear_limits:
         return out
 
     if resources is None:
@@ -157,12 +161,18 @@ def _patch_container(container: dict, idx: int, base_path: str, target: dict) ->
             out.append(PatchOp(op="replace", path=f"{container_path}/limits", value=limits))
         else:
             out.append(PatchOp(op="add", path=f"{container_path}/limits", value=limits))
+    elif clear_limits and "limits" in resources:
+        out.append(PatchOp(op="remove", path=f"{container_path}/limits", value=None))
     return out
 
 
 def patches_to_jsonpatch(patches: list[PatchOp]) -> list[dict]:
     """Serialise PatchOp list to the dict form expected in an AdmissionReview response."""
-    return [{"op": p.op, "path": p.path, "value": p.value} for p in patches]
+    return [
+        {"op": p.op, "path": p.path} if p.op == "remove"
+        else {"op": p.op, "path": p.path, "value": p.value}
+        for p in patches
+    ]
 
 
 def applied_source_crs(pod: dict, overrides: list[ResourceOverride]) -> set[str]:

@@ -627,10 +627,9 @@ def fetch_oom_state(
                 cname = c.get("name")
                 if not cname:
                     continue
-                containers[cname] = {
-                    "requests": dict(c.get("requests") or {}),
-                    "limits":   dict(c.get("limits") or {}),
-                }
+                containers[cname] = {"requests": dict(c.get("requests") or {})}
+                if "limits" in c:
+                    containers[cname]["limits"] = dict(c.get("limits") or {})
             out[(ns, cr_name)] = {
                 "floor": parse_oom_floors_from_annotations(anns),
                 "last_event": parse_oom_last_events_from_annotations(anns),
@@ -1447,6 +1446,10 @@ def _build_containers_payload(
             entry["requests"] = dict(requests)
         if limits:
             entry["limits"] = dict(limits)
+        elif not rc.emit_cpu_limits:
+            # Explicit empty `limits` tells the webhook to REMOVE the pod's
+            # limits sub-tree; an absent key would leave a template CPU limit.
+            entry["limits"] = {}
         payload.append(entry)
 
     # Build the per-container annotation map. Only emit annotations for
@@ -2086,7 +2089,9 @@ def _ordered_container(c: dict) -> dict:
     out = {"name": c["name"]}
     if c.get("requests"):
         out["requests"] = c["requests"]
-    if c.get("limits"):
+    if c.get("limits") or c.get("limits") == {}:
+        # An explicit empty map is meaningful (emitCpuLimits=false with no
+        # other limit): the webhook removes the pod's limits.
         out["limits"] = c["limits"]
     return out
 
@@ -2178,8 +2183,13 @@ def _direct_unchanged(body: dict, live: dict | None) -> bool:
     """True when applying `body` would not change the live CR."""
     if live is None:
         return False
+    live_containers = live.get("containers") or {}
     if _containers_index(body["spec"]["containers"]) != _containers_index(
-            [{"name": n, **v} for n, v in (live.get("containers") or {}).items()]):
+            [{"name": n, **v} for n, v in live_containers.items()]):
+        return False
+    # An explicit empty `limits` differs from an absent one at admission.
+    if {c["name"] for c in body["spec"]["containers"] if "limits" in c} != {
+            n for n, v in live_containers.items() if "limits" in v}:
         return False
     if body["spec"]["selector"]["matchLabels"] != (live.get("selector") or {}):
         return False
