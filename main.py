@@ -25,6 +25,7 @@ Environment variables:
 """
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -38,7 +39,7 @@ from src.overrides import is_workload_skipped, resolve_for_workload, resolve_ski
 from src.prometheus import check_connectivity
 from src.workload import WorkloadRecommendation, list_workloads
 from src.writeback import log_git_credentials_state
-from src.writeback_webhook import write_back_webhook_all
+from src.writeback_webhook import GitPushError, write_back_webhook_all
 from src.git_provider import build_provider
 
 _log = _log_module.get(__name__)
@@ -121,7 +122,8 @@ def _log_global_config(cfg: Config) -> None:
     if cfg.grow_only:     flags.append("growOnly=true")
     if cfg.shrink_only:   flags.append("shrinkOnly=true")
     if cfg.dry_run:       flags.append("dryRun=true")
-    if not cfg.create_mr: flags.append("createMr=false")
+    if cfg.is_direct:     flags.append("writebackMode=direct")
+    elif not cfg.create_mr: flags.append("createMr=false")
     if rc.round_values:   flags.append("roundValues=true")
     if flags:
         _log.info("[config] flags: %s", "  ".join(flags))
@@ -156,6 +158,9 @@ def _log_effective_overrides(rec: WorkloadRecommendation, eff: Config, base: Con
         ("shrinkOnly",       eff.shrink_only,             base.shrink_only,            str),
         ("createMr",         eff.create_mr,               base.create_mr,              str),
         ("dryRun",           eff.dry_run,                 base.dry_run,                str),
+        ("emitCpuLimits",    rc.emit_cpu_limits,          brc.emit_cpu_limits,         str),
+        ("maxChangePct",     rc.max_change_percent,       brc.max_change_percent,      lambda v: f"{v:g}%"),
+        ("cooldownHours",    rc.cooldown_hours,           brc.cooldown_hours,          lambda v: f"{v:g}h"),
     ]:
         if val != dval:
             parts.append(f"{name}={fmt(val)}")
@@ -200,15 +205,19 @@ def cmd_sync(args: argparse.Namespace) -> int:
     # protects against a hand-edited ConfigMap drifting past that gate.
     cfg.validate()
 
-    log_git_credentials_state(
-        repo_url=cfg.cr_writeback.repo_url,
-        git_token=cfg.git_token,
-        git_provider=cfg.git_provider,
-        git_username=cfg.git_username,
-        app_configured=bool(
-            cfg.git_app_id and cfg.git_installation_id and cfg.git_app_private_key
-        ),
-    )
+    if cfg.is_direct:
+        _log.info("[direct] writebackMode=direct — ResourceOverrides are server-side "
+                  "applied to the cluster API; no git repository is used")
+    else:
+        log_git_credentials_state(
+            repo_url=cfg.cr_writeback.repo_url,
+            git_token=cfg.git_token,
+            git_provider=cfg.git_provider,
+            git_username=cfg.git_username,
+            app_configured=bool(
+                cfg.git_app_id and cfg.git_installation_id and cfg.git_app_private_key
+            ),
+        )
     _log_global_config(cfg)
 
     load_config()
@@ -244,7 +253,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
         # 2. List workloads in each opted-in namespace.
         apps_api = client.AppsV1Api()
         batch_api = client.BatchV1Api()
-        workloads = list_workloads(apps_api, [t.name for t in targets], batch_api=batch_api)
+        discovery_failed: set[str] = set()
+        workloads = list_workloads(apps_api, [t.name for t in targets], batch_api=batch_api,
+                                   failed_namespaces=discovery_failed)
 
         if not workloads:
             _log_module.log_phase_banner(_log, "discovery",
@@ -353,9 +364,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
         # 4a. Sample-quality gates. Resolved per workload through the same
         # hierarchy as the OOM knobs. When the gate holds a workload, the
-        # write-back layer re-emits the values already committed to its CR,
-        # so the live CR state has to be on hand even when OOM-aware is off
-        # — hence the fetch below is gated on either feature.
+        # write-back layer re-emits the values already committed to its CR.
         from src.overrides import is_health_gate_enabled
         health_gate_lookup = {
             (rec.namespace, rec.target_name): is_health_gate_enabled(
@@ -366,10 +375,17 @@ def cmd_sync(args: argparse.Namespace) -> int:
             for rec, _ in pairs
         }
 
-        if cfg.resource.oom_detection_enabled or any(health_gate_lookup.values()):
-            from src.writeback_webhook import fetch_oom_state
-            co_api = client.CustomObjectsApi()
-            oom_state_lookup = fetch_oom_state(co_api, opt_in_namespaces)
+        # The live CR state is the baseline for every policy that compares a
+        # new recommendation against what pods are admitted with today:
+        # growOnly / shrinkOnly, the health-gate hold, OOM dedupe and floors.
+        # Fetched unconditionally — gating it on OOM detection or the health
+        # gate turned growOnly / shrinkOnly into a silent no-op whenever both
+        # of those were disabled.
+        from src.writeback_webhook import fetch_oom_state
+        co_api = client.CustomObjectsApi()
+        live_state_failed: set[str] = set()
+        oom_state_lookup = fetch_oom_state(co_api, opt_in_namespaces,
+                                           failed_namespaces=live_state_failed)
 
         if cfg.resource.oom_detection_enabled:
             from src.writeback_webhook import detect_oom_events
@@ -426,31 +442,66 @@ def cmd_sync(args: argparse.Namespace) -> int:
         # buckets entries by `create_mr` and emits up to two pushes per repo:
         # one direct, one MR. The CLI flag `--mr` still flips
         # the helm-level default before resolution, kept for local dev parity.
-        results = write_back_webhook_all(
-            workloads_with_configs=pairs,
-            cr_writeback=cfg.cr_writeback,
-            provider=build_provider(
-                repo_url=cfg.cr_writeback.repo_url,
-                token=cfg.git_token,
-                provider_override=cfg.git_provider,
-                api_url=cfg.git_api_url,
-                username=cfg.git_username,
-                app_id=cfg.git_app_id,
-                installation_id=cfg.git_installation_id,
-                app_private_key=cfg.git_app_private_key,
-            ),
-            git_author_name=cfg.git_author_name,
-            git_author_email=cfg.git_author_email,
-            dry_run=cfg.dry_run,
-            mr_config=cfg.mr,
-            oom_state_lookup=oom_state_lookup,
-            oom_events_lookup=oom_events_lookup,
-            oom_eligibility_lookup=oom_eligibility_lookup,
-            oom_floor_enabled_lookup=oom_floor_enabled_lookup,
-            oom_floor_reset_lookup=oom_floor_reset_lookup,
-            health_gate_lookup=health_gate_lookup,
-            auto_rollout_by_namespace=auto_rollout_by_namespace,
+        # Direct mode deletes tool-owned CRs whose workload is gone; this is
+        # the evidence for "gone". Every discovered workload counts as kept,
+        # whether or not it produced a CR this sync — only an explicit
+        # `skip: "true"` lets its CR go.
+        from src.writeback_webhook import PruneScope
+        prune_scope = PruneScope(
+            keep={
+                (w.namespace, name)
+                for w in workloads if not is_workload_skipped(w.annotations)
+                for name in (w.target_name, f"{w.target_kind.lower()}-{w.target_name}")
+            },
+            blocked_namespaces=set(discovery_failed),
+            unreadable_namespaces=set(live_state_failed),
         )
+        if cfg.is_direct and discovery_failed:
+            _log.warning("[direct] workload discovery incomplete in %s — no orphan deletion "
+                         "there this sync", ", ".join(sorted(discovery_failed)))
+
+        provider = None if cfg.is_direct else build_provider(
+            repo_url=cfg.cr_writeback.repo_url,
+            token=cfg.git_token,
+            provider_override=cfg.git_provider,
+            api_url=cfg.git_api_url,
+            username=cfg.git_username,
+            app_id=cfg.git_app_id,
+            installation_id=cfg.git_installation_id,
+            app_private_key=cfg.git_app_private_key,
+        )
+        try:
+            results = write_back_webhook_all(
+                workloads_with_configs=pairs,
+                cr_writeback=cfg.cr_writeback,
+                provider=provider,
+                git_author_name=cfg.git_author_name,
+                git_author_email=cfg.git_author_email,
+                dry_run=cfg.dry_run,
+                mr_config=cfg.mr,
+                oom_state_lookup=oom_state_lookup,
+                oom_events_lookup=oom_events_lookup,
+                oom_eligibility_lookup=oom_eligibility_lookup,
+                oom_floor_enabled_lookup=oom_floor_enabled_lookup,
+                oom_floor_reset_lookup=oom_floor_reset_lookup,
+                health_gate_lookup=health_gate_lookup,
+                auto_rollout_by_namespace=auto_rollout_by_namespace,
+                writeback_mode=cfg.writeback_mode,
+                custom_objects_api=co_api,
+                core_v1_api=client.CoreV1Api() if cfg.is_direct else None,
+                prune_scope=prune_scope,
+                adopt_foreign_crs=cfg.direct_adopt_foreign_crs,
+            )
+        except GitPushError as exc:
+            _log.error("[push] %s", exc)
+            return 1
+        except subprocess.CalledProcessError as exc:
+            # `_run` already logged the redacted command + output; the
+            # exception's own argv was scrubbed too. Exit cleanly instead of
+            # crash-looping the Job with a traceback.
+            _log.error("[git] git command failed (exit %s) — see the error above; "
+                       "nothing was pushed", exc.returncode)
+            return 1
 
     if not results:
         return 0
@@ -468,12 +519,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
         if n_mr:
             parts.append(f"{n_mr} MR")
         if n_push:
-            parts.append(f"{n_push} direct")
+            parts.append(f"{n_push} {'applied' if cfg.is_direct else 'direct'}")
         subtitle = ", ".join(parts) if parts else None
         _log_module.log_phase_banner(_log, "result", subtitle=subtitle)
         for i, (url, namespaces) in enumerate(results):
             is_mr = "/merge_requests/" in url or "/-/merge_requests/" in url or "/pull/" in url
-            label = "MR" if is_mr else "Pushed"
+            label = "MR" if is_mr else ("Applied" if cfg.is_direct else "Pushed")
             # Same blank-between-not-before pattern as the discovery loop:
             # banner already supplies the leading separator.
             if i > 0:
@@ -554,6 +605,18 @@ def cmd_webhook(args: argparse.Namespace) -> int:
         auto_rollout_debounce = int(os.environ.get("WEBHOOK_AUTO_ROLLOUT_DEBOUNCE_SECONDS", "30"))
     except ValueError:
         auto_rollout_debounce = 30
+    try:
+        auto_rollout_max_concurrent = int(os.environ.get("WEBHOOK_AUTO_ROLLOUT_MAX_CONCURRENT", "1"))
+    except ValueError:
+        auto_rollout_max_concurrent = 1
+    try:
+        auto_rollout_min_interval = int(os.environ.get("WEBHOOK_AUTO_ROLLOUT_MIN_INTERVAL_SECONDS", "0"))
+    except ValueError:
+        auto_rollout_min_interval = 0
+    try:
+        auto_rollout_timeout = int(os.environ.get("WEBHOOK_AUTO_ROLLOUT_TIMEOUT_SECONDS", "600"))
+    except ValueError:
+        auto_rollout_timeout = 600
     run_webhook(
         port=args.port,
         cert_dir=args.cert_dir,
@@ -563,6 +626,9 @@ def cmd_webhook(args: argparse.Namespace) -> int:
         status_flush_interval_seconds=status_flush,
         auto_rollout_enabled=auto_rollout_enabled,
         auto_rollout_debounce_seconds=auto_rollout_debounce,
+        auto_rollout_max_concurrent=auto_rollout_max_concurrent,
+        auto_rollout_min_interval_seconds=auto_rollout_min_interval,
+        auto_rollout_timeout_seconds=auto_rollout_timeout,
     )
     return 0
 

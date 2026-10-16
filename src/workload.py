@@ -32,6 +32,10 @@ class ContainerRecommendation:
     lower_bound: ResourceRequest = field(default_factory=ResourceRequest)
     upper_bound: ResourceRequest = field(default_factory=ResourceRequest)
     uncapped_target: ResourceRequest = field(default_factory=ResourceRequest)
+    # `{"requests": {...}, "limits": {...}}` from the workload's PodTemplate,
+    # captured at discovery. Baseline for the per-sync change cap when no
+    # ResourceOverride exists yet.
+    template_resources: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -64,6 +68,19 @@ class WorkloadRecommendation:
     @property
     def has_recommendation(self) -> bool:
         return len(self.containers) > 0
+
+
+def _template_resources(container) -> dict:
+    """`{"requests": {...}, "limits": {...}}` of a PodTemplate container (str values)."""
+    res = getattr(container, "resources", None)
+    out: dict = {}
+    for section in ("requests", "limits"):
+        vals = getattr(res, section, None) if res is not None else None
+        if isinstance(vals, dict) and vals:
+            out[section] = {str(k): str(v) for k, v in vals.items() if k in ("cpu", "memory")}
+            if not out[section]:
+                out.pop(section)
+    return out
 
 
 def _tmpl_spec_template(item):
@@ -101,9 +118,14 @@ def list_workloads_in_namespace(
     apps_api: client.AppsV1Api,
     namespace: str,
     batch_api: "client.BatchV1Api | None" = None,
+    failed_namespaces: "set[str] | None" = None,
 ) -> list[WorkloadRecommendation]:
     """Discover Deployments, StatefulSets, DaemonSets, and CronJobs in a
     single namespace.
+
+    A per-kind list error is logged and the namespace added to
+    ``failed_namespaces`` (when given): the result is then incomplete, so a
+    caller must not read a missing workload as a deleted one.
 
     Each kind carries its own template accessor and skip predicate so the
     loop body stays uniform:
@@ -160,7 +182,10 @@ def list_workloads_in_namespace(
                 tmpl = tmpl_accessor(item)
                 tmpl_spec = tmpl.spec if tmpl else None
                 containers = [
-                    ContainerRecommendation(container_name=c.name)
+                    ContainerRecommendation(
+                        container_name=c.name,
+                        template_resources=_template_resources(c),
+                    )
                     for c in (tmpl_spec.containers if tmpl_spec else []) or []
                 ]
                 if not containers:
@@ -201,6 +226,8 @@ def list_workloads_in_namespace(
                 ))
         except Exception as exc:
             _log.warning("Failed to list %ss in %s: %s", kind, namespace, exc)
+            if failed_namespaces is not None:
+                failed_namespaces.add(namespace)
     return results
 
 
@@ -208,6 +235,7 @@ def list_workloads(
     apps_api: client.AppsV1Api,
     namespaces: list[str],
     batch_api: "client.BatchV1Api | None" = None,
+    failed_namespaces: "set[str] | None" = None,
 ) -> list[WorkloadRecommendation]:
     """Discover workloads across many namespaces in one call.
 
@@ -224,5 +252,6 @@ def list_workloads(
         if ns in seen:
             continue
         seen.add(ns)
-        out.extend(list_workloads_in_namespace(apps_api, ns, batch_api=batch_api))
+        out.extend(list_workloads_in_namespace(apps_api, ns, batch_api=batch_api,
+                                               failed_namespaces=failed_namespaces))
     return out

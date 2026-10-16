@@ -66,6 +66,26 @@ _req_mem_cache: dict[tuple, int | None] = {}
 # Caches for the sample-quality gates (see src/health.py). Same in-process
 # lifetime as the value caches above.
 _restart_cache: dict[tuple, int | None] = {}
+_restart_status: dict[tuple, str] = {}
+
+# Namespaces for which at least one per-container query raised this sync
+# (network error, HTTP error, unparseable body) — as opposed to returning no
+# series. A missing value then says nothing about the workload, so callers
+# that would act on absence (direct-mode orphan deletion) must hold back.
+_query_error_namespaces: set[str] = set()
+
+
+def _record_query_error(namespace: str) -> None:
+    _query_error_namespaces.add(namespace)
+
+
+def query_error_namespaces() -> set[str]:
+    """Namespaces with at least one failed query since the last reset."""
+    return set(_query_error_namespaces)
+
+
+def reset_query_errors() -> None:
+    _query_error_namespaces.clear()
 _sample_count_cache: dict[tuple, int | None] = {}
 # Cache for detect_scrape_interval — keyed by prometheus_url.
 _scrape_interval_cache: dict[str, str] = {}
@@ -297,6 +317,7 @@ def query_cpu_max_m(
         return result
     except Exception as exc:
         _log.warning("Prometheus CPU limit query failed (%s/%s): %s", namespace, container, exc)
+        _record_query_error(namespace)
         _cache[key] = None
         return None
 
@@ -342,6 +363,7 @@ def query_memory_max_bytes(
         return result
     except Exception as exc:
         _log.warning("Prometheus memory limit query failed (%s/%s): %s", namespace, container, exc)
+        _record_query_error(namespace)
         _mem_cache[key] = None
         return None
 
@@ -400,6 +422,7 @@ def query_cpu_request_m(
         return result
     except Exception as exc:
         _log.warning("Prometheus CPU request query failed (%s/%s): %s", namespace, container, exc)
+        _record_query_error(namespace)
         _req_cpu_cache[key] = None
         return None
 
@@ -448,6 +471,7 @@ def query_mem_request_bytes(
         return result
     except Exception as exc:
         _log.warning("Prometheus memory request query failed (%s/%s): %s", namespace, container, exc)
+        _record_query_error(namespace)
         _req_mem_cache[key] = None
         return None
 
@@ -492,20 +516,45 @@ def query_restart_count(
         f"max(increase(kube_pod_container_status_restarts_total"
         f'{{namespace="{ns_e}",container="{c_e}"{pod_filter}}}[{window}]))'
     )
-    try:
-        resp = requests.get(f"{prometheus_url}/api/v1/query", params={"query": query}, timeout=30)
-        resp.raise_for_status()
-        results = resp.json().get("data", {}).get("result", [])
+    # One retry on a query error: a missing restart signal holds the
+    # container (the crash-loop gate fails closed), so a single transient
+    # Prometheus blip must not freeze every container of the sync.
+    last_exc: Exception | None = None
+    for _attempt in range(2):
+        try:
+            resp = requests.get(f"{prometheus_url}/api/v1/query", params={"query": query}, timeout=30)
+            resp.raise_for_status()
+            results = resp.json().get("data", {}).get("result", [])
+        except Exception as exc:
+            last_exc = exc
+            continue
         if not results:
+            _restart_status[key] = "no-series"
             _restart_cache[key] = None
             return None
         result = round(max(float(r["value"][1]) for r in results))
+        _restart_status[key] = "ok"
         _restart_cache[key] = result
         return result
-    except Exception as exc:
-        _log.warning("Prometheus restart-count query failed (%s/%s): %s", namespace, container, exc)
-        _restart_cache[key] = None
-        return None
+    _log.warning("Prometheus restart-count query failed after one retry (%s/%s): %s",
+                 namespace, container, last_exc)
+    _record_query_error(namespace)
+    _restart_status[key] = "query-error"
+    _restart_cache[key] = None
+    return None
+
+
+def restart_signal_status(
+    prometheus_url: str,
+    namespace: str,
+    container: str,
+    target_name: str | None = None,
+    window: str = "3d",
+) -> str:
+    """Outcome of the last `query_restart_count` for these arguments:
+    "ok", "no-series" (Prometheus answered, no series) or "query-error"
+    (the query failed twice); "" when it was never run."""
+    return _restart_status.get((prometheus_url, namespace, container, target_name, window), "")
 
 
 def query_cpu_sample_count(
@@ -600,6 +649,7 @@ def _run_sample_count_query(
         return result
     except Exception as exc:
         _log.warning("Prometheus sample-count query failed (%s/%s): %s", namespace, container, exc)
+        _record_query_error(namespace)
         _sample_count_cache[cache_key] = None
         return None
 

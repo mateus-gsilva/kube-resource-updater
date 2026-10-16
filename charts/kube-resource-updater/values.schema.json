@@ -44,6 +44,7 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
+        "suspend": { "type": "boolean" },
         "schedule": { "type": "string" },
         "timeZone": { "type": "string" },
         "concurrencyPolicy": { "type": "string", "enum": ["Allow", "Forbid", "Replace"] },
@@ -63,6 +64,13 @@
     "config": {
       "type": "object",
       "properties": {
+        "writebackMode": { "type": "string", "enum": ["gitops", "direct"] },
+        "direct": {
+          "type": "object",
+          "properties": {
+            "adoptForeignCRs": { "type": ["boolean", "string"] }
+          }
+        },
         "gitProvider": { "type": "string", "enum": ["", "auto", "gitlab", "github"] },
         "dryRun": { "type": ["boolean", "string"] },
         "createMr": { "type": ["boolean", "string"] },
@@ -92,6 +100,9 @@
         "roundValues": { "type": ["string", "boolean"] },
         "growOnly": { "type": ["boolean", "string"] },
         "shrinkOnly": { "type": ["boolean", "string"] },
+        "emitCpuLimits": { "type": ["boolean", "string"] },
+        "maxChangePercent": { "type": ["string", "number"] },
+        "cooldownHours": { "type": ["string", "number"] },
         "oomDetectionEnabled": { "type": ["boolean", "string"] },
         "oomBumpFactor": { "type": ["string", "number"] },
         "oomFloorEnabled": { "type": ["boolean", "string"] },
@@ -116,7 +127,8 @@
             "reviewers": { "type": "string" },
             "labels": { "type": "string" },
             "squash": { "type": ["boolean", "string"] },
-            "removeSourceBranch": { "type": ["boolean", "string"] }
+            "removeSourceBranch": { "type": ["boolean", "string"] },
+            "workBranch": { "type": "string", "pattern": "^resource-updater/[A-Za-z0-9._/-]+$" }
           }
         }
       }
@@ -264,7 +276,10 @@
           "type": "object",
           "properties": {
             "enabled": { "type": "boolean" },
-            "debounceSeconds": { "type": ["integer", "string"] }
+            "debounceSeconds": { "type": ["integer", "string"] },
+            "maxConcurrent": { "type": ["integer", "string"] },
+            "minIntervalSeconds": { "type": ["integer", "string"] },
+            "rolloutTimeoutSeconds": { "type": ["integer", "string"] }
           }
         },
         "status": {

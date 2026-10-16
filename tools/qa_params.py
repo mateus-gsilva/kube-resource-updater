@@ -94,6 +94,26 @@ Run:
 #   section_public_readiness_code_fixes            Public-readiness code fixes — dead fn, paste artifact, dedup, content-
 #   section_public_readiness_chart_fixes           Public-readiness chart fixes — labels, NOTES, pdb, seccomp, replicas,
 #   section_health_gate                            Sample-quality gates — crash-loop health + data sufficiency
+#   section_grow_shrink_baseline_always_fetched   growOnly / shrinkOnly baseline — live CR state fetched unconditionally
+#   section_emit_cpu_limits                        emitCpuLimits — no limits.cpu in the CR when disabled
+#   section_max_change_cap                         maxChangePercent — per-sync change cap with OOM exemption
+#   section_change_audit_and_cooldown             Change audit annotations + cooldownHours
+#   section_writeback_direct_mode                  writebackMode=direct — server-side apply + audit + orphan delete
+#   section_cronjob_suspend                        cronjob.suspend — kill switch
+#   section_rollout_replay_and_concurrency         autoRollout — replay suppression + concurrency limit
+#   section_git_push_rejection                     gitops push rejection — rebase + retry once, clean failure otherwise
+#   section_mr_work_branch                         config.mr.workBranch — configurable MR source branch
+#   section_github_status_wording                  GitHub provider status wording
+#   section_dry_run_entry_keeps_committed_doc     per-workload dryRun — committed CR doc carried forward, not dropped
+#   section_direct_prune_partial_failure          direct mode — prune survives partial discovery / Prometheus failure
+#   section_direct_live_state_failure             direct mode — unreadable live CRs skip apply + prune for that namespace
+#   section_rollout_tick_resilience               autoRollout — tick loop survives non-ApiException errors
+#   section_rollout_slot_release                  autoRollout — slot release (timeout + consecutive read errors)
+#   section_direct_foreign_ownership              direct mode — foreign spec ownership + tracking-only strip
+#   section_emit_cpu_limits_empty_limits          emitCpuLimits — explicit empty limits remove the pod's CPU limit
+#   section_restart_query_retry                   restart-count query — retry once, distinguish query-error from no-series
+#   section_direct_delete_paths                   direct mode — every delete re-checks managed-by on the object
+#   section_gitops_unreadable_live_state          gitops — unreadable live CRs leave that namespace's file untouched
 #   section_overrides_unit_file                    Overrides unit tests (tools/test_overrides.py — bridged)
 #   section_live_prometheus                        (dynamic title)
 from __future__ import annotations
@@ -163,6 +183,16 @@ def _check(label: str, got, expected) -> None:
 
 def _check_truthy(label: str, got) -> None:
     _check(label, bool(got), True)
+
+
+def _no_health_gate():
+    """Patch the sample-quality gates to "not held" for tests that exercise
+    unrelated build-phase behaviour with a placeholder Prometheus URL. The
+    crash-loop gate fails closed on a missing restart signal, so an
+    unreachable placeholder would otherwise hold every container.
+    """
+    from src.health import NOT_HELD
+    return patch("src.writeback_webhook.assess_container", return_value=NOT_HELD)
 
 
 def _section(title: str) -> None:
@@ -1203,8 +1233,10 @@ def section_auto_rollout() -> None:
     trig.handle_event("MODIFIED", ro, ro)
     _check("[debounce] same resources → no pending entry", len(trig._pending), 0)
 
-    # _fire_due force-flushes regardless of timer.
-    trig.handle_event("ADDED", ro, None)
+    # _fire_due force-flushes regardless of timer. (A changed CR: an ADDED
+    # carrying the same resources the trigger last saw is a replay and is
+    # suppressed — see section_rollout_replay_and_concurrency.)
+    trig.handle_event("ADDED", ro_changed, None)
     trig._fire_due(force=True)
     _check("[debounce] force-flush calls patch_namespaced_deployment",
            fake_apps.patch_namespaced_deployment.called, True)
@@ -5436,7 +5468,7 @@ def section_create_mr_bucketing() -> None:
         cr_writeback=_CW(repo_url="x", path="overrides"),
     )
     from unittest.mock import patch as _patch
-    with _patch("src.writeback_webhook._query_prom_values",
+    with _no_health_gate(), _patch("src.writeback_webhook._query_prom_values",
                 return_value=type("P", (), {
                     "cpu_request_m": 200, "memory_request_bytes": 100*1024*1024,
                     "cpu_limit_m": 400, "memory_limit_bytes": 300*1024*1024,
@@ -5458,7 +5490,7 @@ def section_create_mr_bucketing() -> None:
         target_kind="StatefulSet", target_name=long_name,
         containers=[_CRec(container_name="app")],
     )
-    with _patch("src.writeback_webhook._query_prom_values",
+    with _no_health_gate(), _patch("src.writeback_webhook._query_prom_values",
                 return_value=type("P", (), {
                     "cpu_request_m": 200, "memory_request_bytes": 100*1024*1024,
                     "cpu_limit_m": 400, "memory_limit_bytes": 300*1024*1024,
@@ -5638,7 +5670,7 @@ def section_dry_run_bucketing() -> None:
     mock_prom = type("P", (), {
         "cpu_request_m": 200, "memory_request_bytes": 100 * 1024 * 1024,
         "cpu_limit_m": 400, "memory_limit_bytes": 300 * 1024 * 1024})()
-    with _patch("src.writeback_webhook._query_prom_values", return_value=mock_prom):
+    with _no_health_gate(), _patch("src.writeback_webhook._query_prom_values", return_value=mock_prom):
         entries, _held = _build_entries([(rec_a, _cfg(True)), (rec_b, _cfg(False))])
     api_e = next((e for e in entries if e.cr_name == "api"), None)
     worker_e = next((e for e in entries if e.cr_name == "worker"), None)
@@ -6116,7 +6148,7 @@ def section_cr_name_collision() -> None:
         (_rec("Deployment", "api"), _cfg()),
         (_rec("StatefulSet", "worker"), _cfg()),
     ]
-    with patch("src.writeback_webhook._query_prom_values", return_value=prom):
+    with _no_health_gate(), patch("src.writeback_webhook._query_prom_values", return_value=prom):
         entries, _held = _build_entries(pairs_clean)
     cr_names = sorted(e.cr_name for e in entries)
     _check("[collision-clean] no collision → bare names preserved",
@@ -6127,7 +6159,7 @@ def section_cr_name_collision() -> None:
         (_rec("Deployment", "shared"), _cfg()),
         (_rec("StatefulSet", "shared"), _cfg()),
     ]
-    with patch("src.writeback_webhook._query_prom_values", return_value=prom):
+    with _no_health_gate(), patch("src.writeback_webhook._query_prom_values", return_value=prom):
         entries, _held = _build_entries(pairs_collide)
     cr_names = sorted(e.cr_name for e in entries)
     _check("[collision] both renamed with kind prefix",
@@ -6142,7 +6174,7 @@ def section_cr_name_collision() -> None:
         (_rec("StatefulSet", "shared"), _cfg()),
         (_rec("StatefulSet", "queue"), _cfg()),
     ]
-    with patch("src.writeback_webhook._query_prom_values", return_value=prom):
+    with _no_health_gate(), patch("src.writeback_webhook._query_prom_values", return_value=prom):
         entries, _held = _build_entries(pairs_mixed)
     cr_names = sorted(e.cr_name for e in entries)
     _check("[collision-mixed] non-colliders keep bare name, colliders prefixed",
@@ -6153,7 +6185,7 @@ def section_cr_name_collision() -> None:
         (_rec("Deployment", "shared", ns="ns-a"), _cfg()),
         (_rec("StatefulSet", "shared", ns="ns-b"), _cfg()),
     ]
-    with patch("src.writeback_webhook._query_prom_values", return_value=prom):
+    with _no_health_gate(), patch("src.writeback_webhook._query_prom_values", return_value=prom):
         entries, _held = _build_entries(pairs_xns)
     cr_names = sorted((e.namespace, e.cr_name) for e in entries)
     _check("[collision-xns] same name in different namespaces is NOT a collision",
@@ -10779,9 +10811,23 @@ def section_health_gate() -> None:
     v = _assess(0, 1200, 700)
     _check("[assess] exactly at the 25% coverage threshold → not held", v.held, False)
     v = _assess(None, 4320, 2304)
-    _check("[assess] restart metric absent (no kube-state-metrics) → fail open, "
-           "not held (holding every workload would be the worse regression)",
-           v.held, False)
+    _check("[assess] restart metric absent (no kube-state-metrics) → fail CLOSED: "
+           "held, because the gate cannot tell a crash loop from a healthy pod",
+           v.held, True)
+    from src.health import HOLD_NO_RESTART_SIGNAL
+    _check("[assess] missing-signal hold carries its own reason code",
+           v.reason, HOLD_NO_RESTART_SIGNAL)
+    _check("[assess] missing-signal hold names the metric and the escape hatch",
+           "kube_pod_container_status_restarts_total" in v.detail
+           and "maxRestartsInWindow" in v.detail, True)
+    rc_off = ResourceConfig(max_restarts_in_window=0)
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("src.health.query_restart_count", return_value=None))
+        stack.enter_context(patch("src.health.query_cpu_sample_count", return_value=4320))
+        stack.enter_context(patch("src.health.query_mem_sample_count", return_value=2304))
+        v_off = assess_container("http://p", "n8n", "n8n", "n8n-main", rc_off)
+    _check("[assess] maxRestartsInWindow=0 disables the gate → missing metric not held",
+           v_off.held, False)
     v = _assess(0, None, None)
     _check("[assess] coverage query failed → fail open (the value queries "
            "return None too, and the existing no-Prom-data path handles it)",
@@ -10851,6 +10897,13 @@ def section_health_gate() -> None:
     _check("[hold] omitted container is still reported as held",
            sorted(held_new), ["n8n"])
 
+    # Missing restart signal holds through the same path: committed values kept.
+    payload_nosig, _a, held_nosig = _build(None, 4320, 2304, live_state)
+    _check("[hold] restart metric absent → committed values preserved, not recomputed",
+           payload_nosig[0]["requests"]["cpu"] if payload_nosig else "MISSING", "2000m")
+    _check("[hold] restart metric absent → container reported as held",
+           sorted(held_nosig), ["n8n"])
+
     # Thin data holds through the same path.
     payload_thin, _a, held_thin = _build(0, 30, 2304, live_state)
     _check("[hold] thin-sample workload preserves committed values",
@@ -10917,6 +10970,1870 @@ def section_health_gate() -> None:
     for key in ("healthGateEnabled", "maxRestartsInWindow", "minSampleCoverage"):
         _check(f"[chart] rendered ConfigMap carries config.{key}",
                key in result.stdout, True)
+
+
+def section_grow_shrink_baseline_always_fetched() -> None:
+    """growOnly / shrinkOnly need the live CR as their baseline. The sync used
+    to fetch that state only when OOM detection or the health gate was on, so
+    with both disabled the clamp silently became a no-op. The fetch (and the
+    read RBAC it needs) must not depend on either feature.
+    """
+    _section("growOnly / shrinkOnly baseline — live CR state fetched unconditionally")
+
+    import argparse as _argparse
+    import main as _main
+    from src.config import Config as _Config, CrWritebackConfig as _CRW, ResourceConfig as _RC
+    from src.discovery import NamespaceTarget as _NsT
+    from src.workload import (
+        ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec,
+    )
+
+    rc = _RC()
+    rc.oom_detection_enabled = False
+    rc.health_gate_enabled = False
+    cfg = _Config(
+        gitlab_url="", gitlab_token="", gitlab_username="",
+        git_author_name="kru", git_author_email="kru@example",
+        dry_run=False, create_mr=False,
+        min_cpu_limit_m=0, min_memory_limit_mi=0,
+        prometheus_url="http://prom:9090", resource=rc,
+        cr_writeback=_CRW(repo_url="https://x/repo.git", path="overrides"),
+        grow_only=True,
+    )
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment",
+                target_name="api", containers=[_CRec(container_name="app")])
+    live = {("ns", "api"): {"containers": {"app": {"requests": {"cpu": "500m"},
+                                                    "limits": {"cpu": "1000m"}}}}}
+    captured: dict = {}
+
+    def _fake_write_back(**kw):
+        captured.update(kw)
+        return None
+
+    with patch("main.Config") as mock_cfg_cls, \
+         patch("main._log_module.setup"), \
+         patch("main.load_config"), \
+         patch("main.log_git_credentials_state"), \
+         patch("main.list_enabled_namespaces",
+               return_value=[_NsT(name="ns", annotations={})]), \
+         patch("main.list_workloads", return_value=[rec]), \
+         patch("main.client"), \
+         patch("main.build_provider"), \
+         patch("src.writeback_webhook.fetch_oom_state", return_value=live) as fetch, \
+         patch("main.write_back_webhook_all", side_effect=_fake_write_back):
+        mock_cfg_cls.load.return_value = cfg
+        _main.cmd_sync(_argparse.Namespace(mr=None))
+
+    _check("[baseline] live CR state fetched with OOM detection AND health gate off",
+           fetch.called, True)
+    _check("[baseline] write-back receives the live CR containers as the grow/shrink baseline",
+           (captured.get("oom_state_lookup") or {}).get(("ns", "api"), {}).get("containers"),
+           live[("ns", "api")]["containers"])
+
+    # The clamp itself, end to end through _build_containers_payload with
+    # both features off: the recommendation below the live value is held.
+    from types import SimpleNamespace
+    from src.writeback_webhook import _build_containers_payload
+    low = SimpleNamespace(cpu_request_m=100, memory_request_bytes=None,
+                          cpu_limit_m=200, memory_limit_bytes=None)
+    with patch("src.writeback_webhook._query_prom_values", return_value=low):
+        payload, _a, _h = _build_containers_payload(
+            rec, cfg, oom_state=live[("ns", "api")], oom_events={},
+            oom_eligible=False, health_gate_enabled=False,
+        )
+    _check("[baseline] growOnly holds the CPU request at the live value",
+           payload[0]["requests"]["cpu"], "500m")
+
+    # Chart: the CronJob ClusterRole must keep get/list on resourceoverrides
+    # when OOM detection is off — otherwise the fetch above gets a 403.
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    chart_dir = _chart_dir()
+    if not helm or not os.path.isdir(chart_dir):
+        print(f"  [{_SKIP}] helm CLI or chart dir unavailable — skipping RBAC render")
+        return
+    res = subprocess.run(
+        [helm, "template", "kru", chart_dir,
+         "--set", "config.crWriteback.repoUrl=https://example/repo.git",
+         "--set", "config.crWriteback.path=overrides",
+         "--set", "config.prometheusUrl=http://qa-prom:9090",
+         "--set", "git.token=qa-fake-token",
+         "--set", "config.oomDetectionEnabled=false",
+         "--show-only", "templates/clusterrole.yaml"],
+        capture_output=True, text=True,
+    )
+    if res.returncode != 0:
+        print(f"  [{_SKIP}] helm render failed: {res.stderr.strip()[:200]}")
+        return
+    _check("[baseline-rbac] resourceoverrides get/list granted with oomDetectionEnabled=false",
+           "resourceoverrides" in res.stdout, True)
+
+
+def section_emit_cpu_limits() -> None:
+    """`config.emitCpuLimits: false` — never write `limits.cpu` into a CR.
+
+    CPU limits throttle (CFS quota) instead of protecting anything for most
+    workloads, so a common policy is "requests only for CPU". The flag must
+    hold through every path that can produce a CPU limit (Prometheus,
+    cold-start synthesis, grow/shrink carrying an old value), drop a
+    `limits.cpu` an existing CR already carries, and resolve through the
+    usual helm < namespace < workload chain.
+    """
+    _section("emitCpuLimits — no limits.cpu in the CR when disabled")
+
+    from types import SimpleNamespace
+    from src.config import ResourceConfig as _RC
+    from src.webhook_cache import ContainerOverride, ResourceOverride
+    from src.webhook_patch import build_patches
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    from src.writeback_webhook import _build_containers_payload
+
+    P = "kube-resource-updater."
+    M = 1024 * 1024
+    _check("[default] emitCpuLimits defaults to true (current behaviour)",
+           _RC().emit_cpu_limits, True)
+    _check("[config] emitCpuLimits: false parsed from the ConfigMap",
+           _RC.from_dict({"emitCpuLimits": False}).emit_cpu_limits, False)
+    _check("[config] emitCpuLimits: \"false\" (string) parsed from the ConfigMap",
+           _RC.from_dict({"emitCpuLimits": "false"}).emit_cpu_limits, False)
+    base = _base_config()
+    _check("[hier] namespace annotation disables CPU limits",
+           resolve_for_workload(base, {P + "emitCpuLimits": "false"}, {}).resource.emit_cpu_limits,
+           False)
+    _check("[hier] workload annotation re-enables over the namespace",
+           resolve_for_workload(base, {P + "emitCpuLimits": "false"},
+                                {P + "emitCpuLimits": "true"}).resource.emit_cpu_limits,
+           True)
+
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                containers=[_CRec(container_name="app")])
+    prom = SimpleNamespace(cpu_request_m=200, memory_request_bytes=128 * M,
+                           cpu_limit_m=800, memory_limit_bytes=384 * M)
+
+    def _build(cfg, state=None, events=None):
+        with _no_health_gate(), patch("src.writeback_webhook._query_prom_values",
+                                      return_value=prom):
+            payload, _a, _h = _build_containers_payload(
+                rec, cfg, oom_state=state, oom_events=events or {},
+                oom_eligible=True, health_gate_enabled=False,
+            )
+        return payload
+
+    cfg_on = _base_config()
+    cfg_on.prometheus_url = "http://prom:9090"
+    p_on = _build(cfg_on)
+    _check("[payload] default → limits.cpu written", p_on[0]["limits"].get("cpu"), "800m")
+
+    cfg_off = _base_config()
+    cfg_off.prometheus_url = "http://prom:9090"
+    cfg_off.resource.emit_cpu_limits = False
+    p_off = _build(cfg_off)
+    _check("[payload] emitCpuLimits=false → no limits.cpu", "cpu" in p_off[0]["limits"], False)
+    _check("[payload] emitCpuLimits=false → requests.cpu still written",
+           p_off[0]["requests"].get("cpu"), "200m")
+    _check("[payload] emitCpuLimits=false → limits.memory still written",
+           p_off[0]["limits"].get("memory"), "384Mi")
+
+    # Existing CR already carries a CPU limit; growOnly would normally keep the
+    # larger old value — the flag still drops it on the next sync.
+    cfg_grow = _base_config()
+    cfg_grow.prometheus_url = "http://prom:9090"
+    cfg_grow.resource.emit_cpu_limits = False
+    cfg_grow.grow_only = True
+    live = {"containers": {"app": {"requests": {"cpu": "100m", "memory": "64Mi"},
+                                   "limits": {"cpu": "4000m", "memory": "128Mi"}}}}
+    p_grow = _build(cfg_grow, state=live)
+    _check("[payload] existing CR limits.cpu dropped even under growOnly",
+           "cpu" in p_grow[0]["limits"], False)
+
+    # Webhook side: a CR without limits.cpu must not inject one. The limits
+    # sub-tree is replaced, so a CPU limit from the workload spec is dropped
+    # as well — that is the point of the flag.
+    ro = ResourceOverride(
+        namespace="ns", name="api", selector_match_labels={"app": "api"},
+        containers=(ContainerOverride(name="app", requests={"cpu": "200m", "memory": "128Mi"},
+                                      limits={"memory": "384Mi"}),),
+    )
+    pod = {"metadata": {"namespace": "ns", "annotations": {"x": "y"}},
+           "spec": {"containers": [{"name": "app", "resources": {
+               "requests": {"cpu": "1"}, "limits": {"cpu": "2", "memory": "1Gi"}}}]}}
+    ops = build_patches(pod, [ro])
+    lim_ops = [o for o in ops if o.path.endswith("/resources/limits")]
+    _check("[webhook] limits replaced with the CR's memory-only limits (no cpu injected)",
+           [o.value for o in lim_ops], [{"memory": "384Mi"}])
+
+    chart_dir = _chart_dir()
+    values_path = os.path.join(chart_dir, "values.yaml")
+    if os.path.isfile(values_path):
+        with open(values_path, encoding="utf-8") as fh:
+            _check("[chart] values.yaml documents @param config.emitCpuLimits",
+                   "@param config.emitCpuLimits " in fh.read(), True)
+
+
+def section_max_change_cap() -> None:
+    """`config.maxChangePercent` — bound how far one sync can move a value.
+
+    Baseline is what pods are admitted with today: the live CR, else the
+    workload's pod-template value, else nothing (no clamp). OOM-driven memory
+    increases are exempt on the way up (an OOMing pod cannot wait several
+    syncs) but still respect maxMemoryLimitMi.
+    """
+    _section("maxChangePercent — per-sync change cap with OOM exemption")
+
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock as _MM
+    from src.config import ResourceConfig as _RC
+    from src.workload import (
+        ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec,
+        list_workloads_in_namespace,
+    )
+    from src.writeback import ResourceBounds
+    from src.writeback_webhook import OomEvent, _apply_max_change, _build_containers_payload
+
+    P = "kube-resource-updater."
+    M = 1024 * 1024
+    _check("[default] maxChangePercent = 0 (disabled, current behaviour)",
+           _RC().max_change_percent, 0.0)
+    _check("[config] maxChangePercent parsed from the ConfigMap",
+           _RC.from_dict({"maxChangePercent": "25"}).max_change_percent, 25.0)
+    _check("[hier] workload annotation overrides maxChangePercent",
+           resolve_for_workload(_base_config(), {P + "maxChangePercent": "50"},
+                                {P + "maxChangePercent": "10"}).resource.max_change_percent,
+           10.0)
+    bad = _base_config()
+    bad.resource.max_change_percent = -5
+    try:
+        bad.validate()
+        rejected = False
+    except SystemExit:
+        rejected = True
+    _check("[validate] negative maxChangePercent rejected at startup", rejected, True)
+
+    nb = ResourceBounds()
+    base = {"requests": {"cpu": "100m", "memory": "1Gi"},
+            "limits": {"cpu": "400m", "memory": "2Gi"}}
+    up = {"requests": {"cpu": "300m", "memory": "3Gi"},
+          "limits": {"cpu": "1200m", "memory": "6Gi"}}
+    out = _apply_max_change(up, base, 50, exempt_memory_up=False, bounds=nb)
+    _check("[cap] cpu request +200% capped to +50%", out["requests"]["cpu"], "150m")
+    _check("[cap] memory request +200% capped to +50%", out["requests"]["memory"], "1536Mi")
+    _check("[cap] cpu limit capped to +50%", out["limits"]["cpu"], "600m")
+    _check("[cap] memory limit capped to +50%", out["limits"]["memory"], "3Gi")
+    down = {"requests": {"cpu": "10m", "memory": "100Mi"},
+            "limits": {"cpu": "40m", "memory": "200Mi"}}
+    out = _apply_max_change(down, base, 50, exempt_memory_up=False, bounds=nb)
+    _check("[cap] cpu request -90% capped to -50%", out["requests"]["cpu"], "50m")
+    _check("[cap] memory request capped to -50%", out["requests"]["memory"], "512Mi")
+    within = {"requests": {"cpu": "120m", "memory": "1Gi"},
+              "limits": {"cpu": "400m", "memory": "2Gi"}}
+    _check("[cap] change inside the cap is untouched",
+           _apply_max_change(within, base, 50, exempt_memory_up=False, bounds=nb), within)
+    out = _apply_max_change(up, base, 50, exempt_memory_up=True, bounds=nb)
+    _check("[cap-oom] OOM exemption lets memory limit grow past the cap",
+           out["limits"]["memory"], "6Gi")
+    _check("[cap-oom] OOM exemption lets memory request grow past the cap",
+           out["requests"]["memory"], "3Gi")
+    _check("[cap-oom] OOM exemption does not apply to CPU", out["requests"]["cpu"], "150m")
+    out = _apply_max_change(down, base, 50, exempt_memory_up=True, bounds=nb)
+    _check("[cap-oom] OOM exemption only covers increases (memory decrease still capped)",
+           out["requests"]["memory"], "512Mi")
+    out = _apply_max_change(up, {"requests": {"cpu": "100m"}}, 50,
+                            exempt_memory_up=False, bounds=nb)
+    _check("[cap] field without a baseline value is not clamped",
+           out["requests"]["memory"], "3Gi")
+    capped_b = ResourceBounds(max_cpu_request_m=120)
+    out = _apply_max_change({"requests": {"cpu": "50m"}}, {"requests": {"cpu": "1000m"}},
+                            10, exempt_memory_up=False, bounds=capped_b)
+    _check("[cap] max bound still wins over the cap's floor (hard invariant)",
+           out["requests"]["cpu"], "120m")
+
+    # ── Through the payload builder: baseline selection ─────────────────
+    prom = SimpleNamespace(cpu_request_m=1000, memory_request_bytes=512 * M,
+                           cpu_limit_m=2000, memory_limit_bytes=1024 * M)
+    cfg = _base_config()
+    cfg.prometheus_url = "http://prom:9090"
+    cfg.resource.max_change_percent = 20
+
+    def _build(container, state=None, events=None):
+        rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                    containers=[container])
+        with _no_health_gate(), patch("src.writeback_webhook._query_prom_values",
+                                      return_value=prom):
+            payload, _a, _h = _build_containers_payload(
+                rec, cfg, oom_state=state, oom_events=events or {},
+                oom_eligible=True, health_gate_enabled=False,
+            )
+        return payload[0] if payload else {}
+
+    live = {"containers": {"app": {"requests": {"cpu": "500m", "memory": "512Mi"},
+                                   "limits": {"cpu": "1000m", "memory": "1Gi"}}}}
+    out = _build(_CRec(container_name="app"), state=live)
+    _check("[baseline] live CR is the baseline (500m +20% = 600m)",
+           out["requests"]["cpu"], "600m")
+    tmpl = _CRec(container_name="app",
+                 template_resources={"requests": {"cpu": "250m"}, "limits": {"cpu": "500m"}})
+    out = _build(tmpl)
+    _check("[baseline] no CR yet → pod-template value is the baseline (250m +20% = 300m)",
+           out["requests"]["cpu"], "300m")
+    out = _build(_CRec(container_name="app"))
+    _check("[baseline] neither CR nor template value → no clamp",
+           out["requests"]["cpu"], "1000m")
+
+    # OOM-driven growth: trap 1Gi × 2.0 = 2Gi, far past +20% of the 1Gi baseline.
+    cfg.resource.oom_bump_factor = 2.0
+    ev = OomEvent(namespace="ns", workload_name="api", container="app",
+                  finished_at="2026-10-15T00:00:00Z", trap_limit_bytes=1024 * M)
+    out = _build(_CRec(container_name="app"), state=live, events={"app": ev})
+    _check("[oom] fresh OOM bump is exempt from the cap on the way up",
+           out["limits"]["memory"], "2Gi")
+    _check("[oom] CPU is still capped in the same sync", out["requests"]["cpu"], "600m")
+    cfg.resource.max_memory_limit_mi = 1536
+    out = _build(_CRec(container_name="app"), state=live, events={"app": ev})
+    _check("[oom] exempt OOM growth still respects maxMemoryLimitMi",
+           out["limits"]["memory"], "1536Mi")
+
+    cfg.resource.max_memory_limit_mi = 0
+    floored = {"floor": {"app": 2048 * M}, "containers": live["containers"]}
+    out = _build(_CRec(container_name="app"), state=floored)
+    _check("[oom] sticky OOM floor is exempt too (capping below it re-creates the OOM)",
+           out["limits"]["memory"], "2Gi")
+
+    # ── Discovery captures the pod-template resources ───────────────────
+    c = _MM()
+    c.name = "app"
+    c.resources.requests = {"cpu": "250m", "memory": "128Mi"}
+    c.resources.limits = {"memory": "256Mi"}
+    item = _MM()
+    item.metadata.name = "api"
+    item.metadata.labels = {}
+    item.metadata.annotations = {}
+    item.spec.paused = False
+    item.spec.template.spec.containers = [c]
+    item.spec.template.spec.init_containers = []
+    item.spec.template.metadata.labels = {"app": "api"}
+    apps = _MM()
+    apps.list_namespaced_deployment.return_value = _MM(items=[item])
+    apps.list_namespaced_stateful_set.return_value = _MM(items=[])
+    apps.list_namespaced_daemon_set.return_value = _MM(items=[])
+    recs = list_workloads_in_namespace(apps, "ns", batch_api=_MM())
+    tr = recs[0].containers[0].template_resources if recs else None
+    _check("[discovery] pod-template requests/limits captured per container",
+           tr, {"requests": {"cpu": "250m", "memory": "128Mi"}, "limits": {"memory": "256Mi"}})
+
+
+def section_change_audit_and_cooldown() -> None:
+    """Audit annotations on every change + `config.cooldownHours`.
+
+    Every time a CR's container resources change, the rendered CR records
+    `kube-resource-updater.io/last-changed` (RFC3339) and
+    `kube-resource-updater.io/previous-resources` (compact JSON of the prior
+    per-container requests/limits). Unchanged CRs carry both forward
+    verbatim, so files stay byte-stable across no-op syncs.
+
+    The cooldown reads `last-changed` from the LIVE CR: younger than N hours
+    → non-OOM changes are skipped (current values kept); a fresh OOM still
+    bumps memory.
+    """
+    _section("Change audit annotations + cooldownHours")
+
+    import datetime as _dt
+    import json as _json
+    from types import SimpleNamespace
+    from src.config import ResourceConfig as _RC
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    from src.writeback_webhook import (
+        LAST_CHANGED_ANNOTATION, PREVIOUS_RESOURCES_ANNOTATION, OomEvent, WebhookEntry,
+        _build_containers_payload, _render_cr_doc,
+    )
+
+    P = "kube-resource-updater."
+    M = 1024 * 1024
+    _check("[keys] last-changed annotation key",
+           LAST_CHANGED_ANNOTATION, "kube-resource-updater.io/last-changed")
+    _check("[keys] previous-resources annotation key",
+           PREVIOUS_RESOURCES_ANNOTATION, "kube-resource-updater.io/previous-resources")
+    _check("[default] cooldownHours = 0 (disabled)", _RC().cooldown_hours, 0.0)
+    _check("[config] cooldownHours parsed", _RC.from_dict({"cooldownHours": "12"}).cooldown_hours, 12.0)
+    _check("[hier] namespace annotation sets cooldownHours",
+           resolve_for_workload(_base_config(), {P + "cooldownHours": "24"}, {}).resource.cooldown_hours,
+           24.0)
+    bad = _base_config()
+    bad.resource.cooldown_hours = -1
+    try:
+        bad.validate()
+        rejected = False
+    except SystemExit:
+        rejected = True
+    _check("[validate] negative cooldownHours rejected", rejected, True)
+
+    now = _dt.datetime(2026, 10, 15, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    new_c = [{"name": "app", "requests": {"cpu": "200m"}, "limits": {"memory": "256Mi"}}]
+    old_c = [{"name": "app", "requests": {"cpu": "100m"}, "limits": {"memory": "128Mi"}}]
+    e = WebhookEntry(namespace="ns", cr_name="api", selector_labels={"app": "api"},
+                     containers=new_c)
+
+    def _prev(containers, anns=None):
+        return {"apiVersion": "kube-resource-updater.io/v1", "kind": "ResourceOverride",
+                "metadata": {"name": "api", "namespace": "ns",
+                             "labels": {"app.kubernetes.io/managed-by": "kube-resource-updater"},
+                             "annotations": dict(anns or {})},
+                "spec": {"selector": {"matchLabels": {"app": "api"}}, "containers": containers}}
+
+    with patch("src.writeback_webhook._utcnow", return_value=now):
+        doc_new = _render_cr_doc(e, None)
+        doc_chg = _render_cr_doc(e, _prev(old_c, {LAST_CHANGED_ANNOTATION: "2026-01-01T00:00:00Z"}))
+        doc_same = _render_cr_doc(e, _prev(new_c, {
+            LAST_CHANGED_ANNOTATION: "2026-01-01T00:00:00Z",
+            PREVIOUS_RESOURCES_ANNOTATION: '{"app":{}}'}))
+    a_new = doc_new["metadata"].get("annotations") or {}
+    a_chg = doc_chg["metadata"].get("annotations") or {}
+    a_same = doc_same["metadata"].get("annotations") or {}
+    _check("[audit] first render stamps last-changed", a_new.get(LAST_CHANGED_ANNOTATION),
+           "2026-10-15T12:00:00Z")
+    _check("[audit] first render has no previous-resources (nothing before it)",
+           PREVIOUS_RESOURCES_ANNOTATION in a_new, False)
+    _check("[audit] changed resources → last-changed refreshed",
+           a_chg.get(LAST_CHANGED_ANNOTATION), "2026-10-15T12:00:00Z")
+    _check("[audit] changed resources → previous-resources holds the prior values (compact JSON)",
+           a_chg.get(PREVIOUS_RESOURCES_ANNOTATION),
+           _json.dumps({"app": {"requests": {"cpu": "100m"}, "limits": {"memory": "128Mi"}}},
+                       separators=(",", ":"), sort_keys=True))
+    _check("[audit] unchanged resources → last-changed carried forward (byte-stable file)",
+           a_same.get(LAST_CHANGED_ANNOTATION), "2026-01-01T00:00:00Z")
+    _check("[audit] unchanged resources → previous-resources carried forward",
+           a_same.get(PREVIOUS_RESOURCES_ANNOTATION), '{"app":{}}')
+
+    # ── Cooldown ────────────────────────────────────────────────────────
+    prom = SimpleNamespace(cpu_request_m=900, memory_request_bytes=512 * M,
+                           cpu_limit_m=1800, memory_limit_bytes=1024 * M)
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                containers=[_CRec(container_name="app")])
+    current = {"requests": {"cpu": "100m", "memory": "128Mi"},
+               "limits": {"cpu": "400m", "memory": "256Mi"}}
+
+    def _state(hours_ago):
+        ts = (now - _dt.timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"annotations": {LAST_CHANGED_ANNOTATION: ts},
+                "containers": {"app": {"requests": dict(current["requests"]),
+                                       "limits": dict(current["limits"])}}}
+
+    def _build(cooldown, state, events=None):
+        cfg = _base_config()
+        cfg.prometheus_url = "http://prom:9090"
+        cfg.resource.cooldown_hours = cooldown
+        cfg.resource.oom_bump_factor = 2.0
+        with _no_health_gate(), \
+             patch("src.writeback_webhook._utcnow", return_value=now), \
+             patch("src.writeback_webhook._query_prom_values", return_value=prom) as q:
+            payload, _a, _h = _build_containers_payload(
+                rec, cfg, oom_state=state, oom_events=events or {},
+                oom_eligible=True, health_gate_enabled=True,
+            )
+        return (payload[0] if payload else {}), q.called
+
+    out, queried = _build(6, _state(1))
+    _check("[cooldown] changed 1h ago, cooldown 6h → current values kept",
+           {"requests": out.get("requests"), "limits": out.get("limits")}, current)
+    _check("[cooldown] in cooldown → Prometheus not even queried", queried, False)
+    out, _q = _build(6, _state(7))
+    _check("[cooldown] changed 7h ago, cooldown 6h → recomputed", out["requests"]["cpu"], "900m")
+    out, _q = _build(0, _state(1))
+    _check("[cooldown] cooldownHours=0 → disabled, recomputed", out["requests"]["cpu"], "900m")
+    out, _q = _build(6, {"containers": _state(1)["containers"]})
+    _check("[cooldown] CR without last-changed → not in cooldown", out["requests"]["cpu"], "900m")
+    ev = OomEvent(namespace="ns", workload_name="api", container="app",
+                  finished_at="2026-10-15T11:30:00Z", trap_limit_bytes=256 * M)
+    out, _q = _build(6, _state(1), events={"app": ev})
+    _check("[cooldown] fresh OOM inside the cooldown still bumps memory",
+           out["limits"]["memory"], "512Mi")
+    _check("[cooldown] fresh OOM inside the cooldown leaves CPU at the current value",
+           out["requests"]["cpu"], "100m")
+
+
+def section_writeback_direct_mode() -> None:
+    """`config.writebackMode: direct` — server-side apply CRs to the API.
+
+    Covers: config/validation (no git settings required), SSA call shape
+    (field manager, force, apply content type), the apply body carrying only
+    tool-owned metadata, ArgoCD tracking-metadata stripping, audit
+    annotations + Kubernetes Event, unchanged-CR skip, orphan deletion scoped
+    to tool-owned CRs, dryRun, and the chart's conditional RBAC.
+    """
+    _section("writebackMode=direct — server-side apply + audit + orphan delete")
+
+    import argparse as _argparse
+    import datetime as _dt
+    import json as _json
+    import shutil
+    import subprocess
+    from unittest.mock import MagicMock as _MM
+    import main as _main
+    from kubernetes.client.rest import ApiException
+    from src.config import Config as _Config, CrWritebackConfig as _CRW, ResourceConfig as _RC
+    from src.discovery import NamespaceTarget as _NsT
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    from src.writeback_webhook import (
+        FIELD_MANAGER, LAST_CHANGED_ANNOTATION, PREVIOUS_RESOURCES_ANNOTATION,
+        WebhookEntry, _apply_direct, _render_cr_doc, write_back_webhook_all,
+    )
+
+    # ── Config ──────────────────────────────────────────────────────────
+    def _cfg(**kw) -> _Config:
+        base = dict(
+            gitlab_url="", gitlab_token="", gitlab_username="",
+            git_author_name="kru", git_author_email="kru@example",
+            dry_run=False, create_mr=True, min_cpu_limit_m=0, min_memory_limit_mi=0,
+            prometheus_url="http://prom:9090", resource=_RC(),
+            cr_writeback=_CRW(repo_url="", path=""),
+        )
+        base.update(kw)
+        return _Config(**base)
+
+    def _validates(cfg) -> bool:
+        try:
+            cfg.validate()
+            return True
+        except SystemExit:
+            return False
+
+    _check("[config] writebackMode defaults to gitops", _cfg().writeback_mode, "gitops")
+    _check("[config] gitops mode still requires crWriteback + git token",
+           _validates(_cfg()), False)
+    _check("[config] direct mode needs no crWriteback, token or author identity",
+           _validates(_cfg(writeback_mode="direct", git_author_name="", git_author_email="")),
+           True)
+    _check("[config] unknown writebackMode rejected (push-only is not implemented)",
+           _validates(_cfg(writeback_mode="push-only")), False)
+    import tempfile as _tf
+    with _tf.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        fh.write("config:\n  writebackMode: Direct\n  prometheusUrl: http://p\n")
+        cfg_path = fh.name
+    _check("[config] writebackMode read from the ConfigMap (case-insensitive)",
+           _Config.from_file(cfg_path).writeback_mode, "direct")
+    os.unlink(cfg_path)
+
+    # ── Fixtures ────────────────────────────────────────────────────────
+    now = _dt.datetime(2026, 10, 15, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    new_c = [{"name": "app", "requests": {"cpu": "200m", "memory": "256Mi"},
+              "limits": {"memory": "512Mi"}}]
+    old_c = {"app": {"requests": {"cpu": "100m", "memory": "128Mi"},
+                     "limits": {"memory": "256Mi"}}}
+
+    def _entry(name="api", ns="ns", dry=False):
+        return WebhookEntry(namespace=ns, cr_name=name, selector_labels={"app": name},
+                            containers=[dict(c) for c in new_c], dry_run=dry)
+
+    def _live(containers, annotations=None, labels=None, managed=None, selector=None):
+        return {"containers": containers, "annotations": dict(annotations or {}),
+                "labels": dict(labels or {}), "managed_fields": managed or [],
+                "selector": selector or {"app": "api"}, "uid": "uid-1",
+                "resource_version": "7"}
+
+    def _apis(cluster_items=None, apply_result=None):
+        co = _MM()
+        co.api_client.call_api.side_effect = (
+            lambda *a, **k: apply_result if apply_result is not None
+            else {"metadata": {"uid": "uid-new", "resourceVersion": "8"},
+                  "spec": {"containers": k["body"]["spec"]["containers"]}})
+        co.list_cluster_custom_object.return_value = {"items": cluster_items or []}
+        core = _MM()
+        return co, core
+
+    def _run(entries, state, *, dry=False, cluster_items=None, apply_result=None):
+        co, core = _apis(cluster_items, apply_result)
+        with patch("src.writeback_webhook._utcnow", return_value=now):
+            res = _apply_direct(entries, state_lookup=state, global_dry_run=dry,
+                                custom_objects_api=co, core_v1_api=core)
+        return res, co, core
+
+    def _apply_calls(co):
+        return [c for c in co.api_client.call_api.call_args_list]
+
+    # ── New CR: SSA create ──────────────────────────────────────────────
+    res, co, core = _run([_entry()], {})
+    calls = _apply_calls(co)
+    _check("[ssa] one apply call for a new CR", len(calls), 1)
+    if calls:
+        args, kw = calls[0]
+        _check("[ssa] PATCH to the namespaced resourceoverrides path",
+               (args[1], args[2].get("namespace"), args[2].get("name"), args[2].get("plural")),
+               ("PATCH", "ns", "api", "resourceoverrides"))
+        _check("[ssa] apply-patch content type",
+               args[4].get("Content-Type"), "application/apply-patch+yaml")
+        _check("[ssa] field manager = kube-resource-updater, force=true",
+               dict(args[3]), {"fieldManager": FIELD_MANAGER, "force": "true"})
+        _check("[ssa] FIELD_MANAGER constant", FIELD_MANAGER, "kube-resource-updater")
+        body = kw["body"]
+        _check("[ssa] body is a full ResourceOverride apply config",
+               (body["apiVersion"], body["kind"], body["metadata"]["name"]),
+               ("kube-resource-updater.io/v1", "ResourceOverride", "api"))
+        _check("[ssa] tool-owned label applied",
+               body["metadata"]["labels"], {"app.kubernetes.io/managed-by": "kube-resource-updater"})
+        _check("[audit] new CR stamps last-changed",
+               body["metadata"]["annotations"].get(LAST_CHANGED_ANNOTATION), "2026-10-15T12:00:00Z")
+        _check("[audit] new CR has no previous-resources",
+               PREVIOUS_RESOURCES_ANNOTATION in body["metadata"]["annotations"], False)
+    ev_calls = core.create_namespaced_event.call_args_list
+    _check("[event] one Event emitted for the new CR", len(ev_calls), 1)
+    if ev_calls:
+        ev_ns, ev_body = ev_calls[0].args[0], ev_calls[0].kwargs.get("body") or ev_calls[0].args[1]
+        _check("[event] Event in the CR's namespace", ev_ns, "ns")
+        _check("[event] reason ResourcesUpdated", ev_body["reason"], "ResourcesUpdated")
+        _check("[event] involvedObject is the CR",
+               (ev_body["involvedObject"]["kind"], ev_body["involvedObject"]["name"],
+                ev_body["involvedObject"]["uid"]),
+               ("ResourceOverride", "api", "uid-new"))
+    _check("[result] direct apply reports the namespace", res and res[0][1], ["ns"])
+
+    # ── Changed CR migrated from gitops (ArgoCD tracking metadata) ──────
+    managed = [
+        {"manager": "argocd-controller", "operation": "Apply",
+         "fieldsV1": {"f:metadata": {"f:labels": {"f:app.kubernetes.io/instance": {}},
+                                     "f:annotations": {"f:argocd.argoproj.io/tracking-id": {}}}}},
+    ]
+    live = _live(old_c,
+                 annotations={"argocd.argoproj.io/tracking-id": "app:kru/ResourceOverride:ns/api",
+                              "team": "payments",
+                              LAST_CHANGED_ANNOTATION: "2026-01-01T00:00:00Z"},
+                 labels={"app.kubernetes.io/instance": "overrides",
+                         "app.kubernetes.io/managed-by": "kube-resource-updater"},
+                 managed=managed)
+    res, co, core = _run([_entry()], {("ns", "api"): live})
+    calls = _apply_calls(co)
+    body = calls[0].kwargs["body"] if calls else {"metadata": {"annotations": {}, "labels": {}}}
+    anns = body["metadata"].get("annotations") or {}
+    _check("[audit] change stamps last-changed", anns.get(LAST_CHANGED_ANNOTATION),
+           "2026-10-15T12:00:00Z")
+    _check("[audit] change records previous-resources from the live CR",
+           _json.loads(anns.get(PREVIOUS_RESOURCES_ANNOTATION, "{}")), old_c)
+    _check("[ssa] operator annotations are NOT copied into the apply (left to their owner)",
+           "team" in anns, False)
+    _check("[strip] ArgoCD tracking-id never part of the apply", any(
+        k.startswith("argocd.argoproj.io/") for k in anns), False)
+    merge_calls = co.patch_namespaced_custom_object.call_args_list
+    strip = [c.kwargs.get("body") for c in merge_calls
+             if (c.kwargs.get("body") or {}).get("metadata")]
+    _check("[strip] merge patch removes argocd.argoproj.io/* annotations",
+           bool(strip) and strip[0]["metadata"].get("annotations"),
+           {"argocd.argoproj.io/tracking-id": None})
+    _check("[strip] instance label owned by an ArgoCD manager is removed",
+           bool(strip) and strip[0]["metadata"].get("labels"),
+           {"app.kubernetes.io/instance": None})
+    ev_body = core.create_namespaced_event.call_args.kwargs.get("body") \
+        if core.create_namespaced_event.called else {"message": ""}
+    _check("[event] message shows old → new values",
+           "100m→200m" in ev_body["message"] and "256Mi→512Mi" in ev_body["message"], True)
+
+    # instance label set by someone else (e.g. Helm) is NOT touched.
+    live_helm = _live(old_c, labels={"app.kubernetes.io/instance": "mine"}, managed=[
+        {"manager": "helm", "fieldsV1": {"f:metadata": {"f:labels": {
+            "f:app.kubernetes.io/instance": {}}}}}])
+    _res, co, _core = _run([_entry()], {("ns", "api"): live_helm})
+    strip = [c.kwargs.get("body") for c in co.patch_namespaced_custom_object.call_args_list
+             if (c.kwargs.get("body") or {}).get("metadata")]
+    _check("[strip] instance label not owned by ArgoCD is left alone", strip, [])
+
+    # ── Unchanged CR: no write, no event ────────────────────────────────
+    same = _live({"app": {"requests": dict(new_c[0]["requests"]),
+                          "limits": dict(new_c[0]["limits"])}},
+                 annotations={LAST_CHANGED_ANNOTATION: "2026-01-01T00:00:00Z"},
+                 labels={"app.kubernetes.io/managed-by": "kube-resource-updater"},
+                 managed=[{"manager": FIELD_MANAGER, "fieldsV1": {}}])
+    res, co, core = _run([_entry()], {("ns", "api"): same})
+    _check("[noop] unchanged CR → no apply", co.api_client.call_api.called, False)
+    _check("[noop] unchanged CR → no Event", core.create_namespaced_event.called, False)
+
+    # ── Stale field kept by another manager after apply → spec reset ────
+    stale = {"metadata": {"uid": "u"}, "spec": {"containers": [
+        {"name": "app", "requests": new_c[0]["requests"],
+         "limits": {"memory": "512Mi", "cpu": "2"}}]}}
+    _res, co, _core = _run([_entry()], {("ns", "api"): _live(old_c)}, apply_result=stale)
+    spec_fix = [c.kwargs.get("body") for c in co.patch_namespaced_custom_object.call_args_list
+                if (c.kwargs.get("body") or {}).get("spec")]
+    _check("[ssa] field co-owned by another manager survives SSA → spec.containers replaced",
+           bool(spec_fix) and spec_fix[0]["spec"]["containers"], new_c)
+
+    # ── Orphan deletion ─────────────────────────────────────────────────
+    def _item(ns, name):
+        return {"metadata": {"namespace": ns, "name": name,
+                             "labels": {"app.kubernetes.io/managed-by": "kube-resource-updater"}}}
+    items = [_item("ns", "api"), _item("ns", "gone"), _item("old-ns", "x")]
+    res, co, _core = _run([_entry()], {}, cluster_items=items)
+    lst = co.list_cluster_custom_object.call_args
+    _check("[prune] orphan listing filters on the tool's managed-by label",
+           (lst.kwargs or {}).get("label_selector") if lst else None,
+           "app.kubernetes.io/managed-by=kube-resource-updater")
+    deleted = sorted((c.args[2], c.args[4]) if len(c.args) >= 5 else
+                     (c.kwargs.get("namespace"), c.kwargs.get("name"))
+                     for c in co.delete_namespaced_custom_object.call_args_list)
+    _check("[prune] tool-owned CRs no longer wanted are deleted",
+           deleted, [("ns", "gone"), ("old-ns", "x")])
+    res, co, _core = _run([_entry()], {}, cluster_items=[
+        {"metadata": {"namespace": "ns", "name": "hand-made", "labels": {}}}])
+    _check("[prune] a CR without the managed-by label is never deleted",
+           co.delete_namespaced_custom_object.called, False)
+    co_fail, core_fail = _apis()
+    co_fail.list_cluster_custom_object.side_effect = ApiException(status=500)
+    with patch("src.writeback_webhook._utcnow", return_value=now):
+        _apply_direct([_entry()], state_lookup={}, global_dry_run=False,
+                      custom_objects_api=co_fail, core_v1_api=core_fail)
+    _check("[prune] listing failure → no deletion attempted",
+           co_fail.delete_namespaced_custom_object.called, False)
+    res, co, _core = _run([], {}, cluster_items=items)
+    _check("[prune] no entries at all (e.g. Prometheus outage) → nothing deleted",
+           co.delete_namespaced_custom_object.called, False)
+
+    # ── dryRun ──────────────────────────────────────────────────────────
+    res, co, core = _run([_entry()], {}, dry=True, cluster_items=items)
+    _check("[dry] global dryRun → no apply", co.api_client.call_api.called, False)
+    _check("[dry] global dryRun → no delete", co.delete_namespaced_custom_object.called, False)
+    _check("[dry] global dryRun → no Event", core.create_namespaced_event.called, False)
+    res, co, core = _run([_entry(), _entry("worker", dry=True)], {},
+                         cluster_items=[_item("ns", "worker")])
+    applied_names = [c.args[2]["name"] for c in co.api_client.call_api.call_args_list]
+    _check("[dry] per-workload dryRun entry is not applied", applied_names, ["api"])
+    _check("[dry] per-workload dryRun entry's CR is not pruned",
+           co.delete_namespaced_custom_object.called, False)
+
+    # ── write_back_webhook_all routes to the API, never to git ──────────
+    co, core = _apis()
+    with patch("src.writeback_webhook._build_entries", return_value=([_entry()], [])), \
+         patch("src.writeback_webhook._commit_repo") as commit, \
+         patch("src.writeback_webhook._utcnow", return_value=now):
+        write_back_webhook_all(
+            workloads_with_configs=[(None, None)], cr_writeback=_CRW(), provider=None,
+            git_author_name="", git_author_email="", writeback_mode="direct",
+            custom_objects_api=co, core_v1_api=core,
+        )
+    _check("[route] direct mode never touches git", commit.called, False)
+    _check("[route] direct mode applies through the API", co.api_client.call_api.called, True)
+
+    # ── gitops render drops a committed tracking-id ─────────────────────
+    prev = {"metadata": {"name": "api", "namespace": "ns",
+                         "annotations": {"argocd.argoproj.io/tracking-id": "x",
+                                         "argocd.argoproj.io/sync-options": "Prune=false"}},
+            "spec": {"containers": new_c}}
+    doc = _render_cr_doc(_entry(), prev)
+    anns = doc["metadata"].get("annotations") or {}
+    _check("[strip-gitops] ArgoCD tracking-id never carried into the rendered doc",
+           "argocd.argoproj.io/tracking-id" in anns, False)
+    _check("[strip-gitops] operator-set ArgoCD sync options are kept in gitops mode",
+           anns.get("argocd.argoproj.io/sync-options"), "Prune=false")
+
+    # ── cmd_sync wiring ─────────────────────────────────────────────────
+    cfg = _cfg(writeback_mode="direct")
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                containers=[_CRec(container_name="app")])
+    captured: dict = {}
+    with patch("main.Config") as mock_cfg_cls, \
+         patch("main._log_module.setup"), patch("main.load_config"), \
+         patch("main.log_git_credentials_state") as git_log, \
+         patch("main.list_enabled_namespaces", return_value=[_NsT(name="ns", annotations={})]), \
+         patch("main.list_workloads", return_value=[rec]), patch("main.client"), \
+         patch("main.build_provider") as bp, \
+         patch("src.writeback_webhook.fetch_oom_state", return_value={}), \
+         patch("src.writeback_webhook.detect_oom_events", return_value={}), \
+         patch("main.write_back_webhook_all",
+               side_effect=lambda **kw: captured.update(kw)):
+        mock_cfg_cls.load.return_value = cfg
+        rc_sync = _main.cmd_sync(_argparse.Namespace(mr=None))
+    _check("[sync] direct mode exits 0 without any git configuration", rc_sync, 0)
+    _check("[sync] direct mode builds no git provider", bp.called, False)
+    _check("[sync] direct mode skips the git credential log", git_log.called, False)
+    _check("[sync] write-back told to apply directly", captured.get("writeback_mode"), "direct")
+
+    # ── Chart ───────────────────────────────────────────────────────────
+    helm = shutil.which("helm")
+    chart_dir = _chart_dir()
+    if not helm or not os.path.isdir(chart_dir):
+        print(f"  [{_SKIP}] helm CLI or chart dir unavailable — skipping chart renders")
+        return
+
+    def _tpl(sets, show=None):
+        cmd = [helm, "template", "kru", chart_dir, "--set", "config.prometheusUrl=http://p:9090"]
+        for kv in sets:
+            cmd += ["--set", kv]
+        if show:
+            cmd += ["--show-only", show]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    rc_d, out_d = _tpl(["config.writebackMode=direct"], "templates/clusterrole.yaml")
+    _check("[chart] direct mode renders without crWriteback / git token", rc_d, 0)
+    _check("[chart] direct mode grants create/patch/delete on resourceoverrides",
+           '["create", "patch", "delete"]' in out_d, True)
+    _check("[chart] direct mode grants create/patch on events",
+           'resources: ["events"]' in out_d, True)
+    rc_g, out_g = _tpl(["config.crWriteback.repoUrl=https://e/r.git",
+                        "config.crWriteback.path=o", "git.token=t"],
+                       "templates/clusterrole.yaml")
+    _check("[chart] gitops render still fine", rc_g, 0)
+    _check("[chart] gitops mode has NO write verbs on resourceoverrides",
+           '["create", "patch", "delete"]' in out_g, False)
+    _check("[chart] gitops mode has NO events grant", 'resources: ["events"]' in out_g, False)
+    rc_m, _o = _tpl([])
+    _check("[chart] gitops mode still requires crWriteback (render fails without it)",
+           rc_m != 0, True)
+    rc_bad, out_bad = _tpl(["config.writebackMode=push-only"])
+    _check("[chart] unknown writebackMode rejected by the schema", rc_bad != 0, True)
+    rc_cm, out_cm = _tpl(["config.writebackMode=direct"], "templates/configmap.yaml")
+    _check("[chart] ConfigMap carries writebackMode: direct",
+           "writebackMode: direct" in out_cm, True)
+
+
+def section_cronjob_suspend() -> None:
+    """`cronjob.suspend` — kill switch that stops scheduling new syncs without
+    uninstalling (the webhook keeps applying the CRs already in place)."""
+    _section("cronjob.suspend — kill switch")
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    chart_dir = _chart_dir()
+    if not helm or not os.path.isdir(chart_dir):
+        print(f"  [{_SKIP}] helm CLI or chart dir unavailable")
+        return
+
+    def _cj(*sets):
+        cmd = [helm, "template", "kru", chart_dir,
+               "--set", "config.prometheusUrl=http://p:9090",
+               "--set", "config.writebackMode=direct",
+               "--show-only", "templates/cronjob.yaml"]
+        for kv in sets:
+            cmd += ["--set", kv]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    rc, out = _cj()
+    _check("[suspend] default render ok", rc, 0)
+    _check("[suspend] default → spec.suspend: false", "\n  suspend: false\n" in out, True)
+    rc, out = _cj("cronjob.suspend=true")
+    _check("[suspend] cronjob.suspend=true → spec.suspend: true",
+           "\n  suspend: true\n" in out, True)
+    rc, _o = _cj("cronjob.suspend=maybe")
+    _check("[suspend] non-boolean rejected by the schema", rc != 0, True)
+
+
+def section_rollout_replay_and_concurrency() -> None:
+    """autoRollout safety.
+
+    (a) A restart fires only when a CR's resources differ from the last state
+        the webhook knew. Watch replays (ADDED for an object already cached,
+        duplicate MODIFIED) and the initial list after a (re)connect seed
+        that state instead of restarting.
+    (b) `maxConcurrent` bounds how many workload rollouts run at once
+        (a rollout counts until the controller reports it complete, or a
+        timeout) and `minIntervalSeconds` spaces consecutive restarts; due
+        restarts beyond that queue instead of firing together.
+    """
+    _section("autoRollout — replay suppression + concurrency limit")
+
+    import datetime as _dt
+    from unittest.mock import MagicMock as _MM
+    from src.webhook_cache import ContainerOverride, ResourceOverride, ResourceOverrideCache
+    from src.webhook_rollout import RolloutTrigger
+
+    def _ro(name, cpu="100m"):
+        return ResourceOverride(namespace="ns", name=name, selector_match_labels={"app": name},
+                                containers=(ContainerOverride(name="c", requests={"cpu": cpu},
+                                                              limits={}),))
+
+    def _deploy(name):
+        d = _MM()
+        d.metadata.name = name
+        d.metadata.annotations = {}
+        d.spec.template.metadata.labels = {"app": name}
+        return d
+
+    names = ["a", "b", "c"]
+    apps = _MM()
+    apps.list_namespaced_deployment.return_value = _MM(items=[_deploy(n) for n in names])
+    apps.list_namespaced_stateful_set.return_value = _MM(items=[])
+    apps.list_namespaced_daemon_set.return_value = _MM(items=[])
+    ns_cache = _MM()
+    ns_cache.annotations.return_value = {}
+
+    def _trig(**kw):
+        return RolloutTrigger(apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True,
+                              debounce_seconds=999, **kw)
+
+    # ── (a) replay suppression ──────────────────────────────────────────
+    t = _trig()
+    t.handle_event("ADDED", _ro("a"), _ro("a"))
+    _check("[replay] ADDED replay of an already-cached, identical CR → no restart",
+           len(t._pending), 0)
+    t.seed([_ro("a")])
+    t.handle_event("ADDED", _ro("a"), None)
+    _check("[replay] ADDED for a CR seeded from the initial list → no restart",
+           len(t._pending), 0)
+    t.handle_event("ADDED", _ro("a", cpu="200m"), None)
+    _check("[replay] ADDED whose resources differ from the seeded state → restart",
+           len(t._pending), 1)
+    t._pending.clear()
+    t.handle_event("MODIFIED", _ro("a", cpu="200m"), None)
+    _check("[replay] duplicate delivery of the same new state → no second restart",
+           len(t._pending), 0)
+    t.handle_event("ADDED", _ro("brand-new"), None)
+    _check("[replay] a genuinely new CR (never seen) is still a restart candidate",
+           apps.list_namespaced_deployment.called, True)
+    t2 = _trig()
+    t2.handle_event("DELETED", _ro("a"), _ro("a"))
+    t2.handle_event("ADDED", _ro("a"), None)
+    _check("[replay] re-created after delete → candidate again", len(t2._pending), 1)
+
+    seeded: list = []
+    api = _MM()
+    api.list_cluster_custom_object.return_value = {
+        "metadata": {"resourceVersion": "1"},
+        "items": [{"metadata": {"namespace": "ns", "name": "a"},
+                   "spec": {"selector": {"matchLabels": {"app": "a"}},
+                            "containers": [{"name": "c", "requests": {"cpu": "100m"}}]}}]}
+    events: list = []
+    cache = ResourceOverrideCache(api, event_callback=lambda *a: events.append(a),
+                                  seed_callback=lambda ros: seeded.extend(ros))
+    cache._initial_list()
+    _check("[seed] bootstrap list seeds the trigger", [r.name for r in seeded], ["a"])
+    _check("[seed] bootstrap list fires no events", events, [])
+    seeded.clear()
+    cache._initial_list()
+    _check("[seed] reconnect re-list seeds the trigger again", [r.name for r in seeded], ["a"])
+    _check("[seed] reconnect with nothing changed fires no events", events, [])
+
+    # ── (b) concurrency limit ───────────────────────────────────────────
+    past = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=5)
+
+    def _due(trig):
+        for n in names:
+            trig.handle_event("ADDED", _ro(n), None)
+        for entry in trig._pending.values():
+            entry.fire_at = past
+
+    status = {"done": False}
+
+    def _read(name, namespace):
+        d = _MM()
+        d.metadata.generation = 2
+        d.spec.replicas = 2
+        d.status.observed_generation = 2 if status["done"] else 1
+        d.status.updated_replicas = 2 if status["done"] else 1
+        d.status.available_replicas = 2 if status["done"] else 1
+        return d
+
+    apps.read_namespaced_deployment.side_effect = _read
+    apps.patch_namespaced_deployment.reset_mock()
+    t = _trig(max_concurrent=1, min_interval_seconds=0)
+    _check("[limit] default maxConcurrent is 1", RolloutTrigger(
+        apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True)._max_concurrent, 1)
+    _due(t)
+    t._fire_due()
+    _check("[limit] 3 due restarts, maxConcurrent=1 → exactly 1 fired",
+           apps.patch_namespaced_deployment.call_count, 1)
+    _check("[limit] the other 2 stay queued", len(t._pending), 2)
+    t._fire_due()
+    _check("[limit] rollout still in progress → nothing more fired",
+           apps.patch_namespaced_deployment.call_count, 1)
+    status["done"] = True
+    t._fire_due()
+    _check("[limit] rollout complete → next queued restart fires",
+           apps.patch_namespaced_deployment.call_count, 2)
+    status["done"] = False
+    t._in_flight = {k: v - _dt.timedelta(seconds=10_000) for k, v in t._in_flight.items()}
+    t._fire_due()
+    _check("[limit] a rollout stuck past the timeout frees its slot",
+           apps.patch_namespaced_deployment.call_count, 3)
+
+    apps.patch_namespaced_deployment.reset_mock()
+    t = _trig(max_concurrent=0, min_interval_seconds=60)
+    _due(t)
+    t._fire_due()
+    _check("[interval] minIntervalSeconds=60 → one restart per interval",
+           apps.patch_namespaced_deployment.call_count, 1)
+    t._fire_due()
+    _check("[interval] second tick inside the interval fires nothing",
+           apps.patch_namespaced_deployment.call_count, 1)
+    t._last_fire_at -= _dt.timedelta(seconds=61)
+    t._fire_due()
+    _check("[interval] after the interval the next restart fires",
+           apps.patch_namespaced_deployment.call_count, 2)
+    apps.patch_namespaced_deployment.reset_mock()
+    t = _trig(max_concurrent=0, min_interval_seconds=0)
+    _due(t)
+    t._fire_due()
+    _check("[limit] maxConcurrent=0 + no interval → unlimited (previous behaviour)",
+           apps.patch_namespaced_deployment.call_count, 3)
+
+    # ── Chart wiring ────────────────────────────────────────────────────
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    chart_dir = _chart_dir()
+    if not helm or not os.path.isdir(chart_dir):
+        print(f"  [{_SKIP}] helm CLI or chart dir unavailable")
+        return
+    r = subprocess.run(
+        [helm, "template", "kru", chart_dir, "--set", "config.prometheusUrl=http://p:9090",
+         "--set", "config.writebackMode=direct", "--set", "webhook.enabled=true",
+         "--set", "webhook.autoRollout.enabled=true",
+         "--set", "webhook.autoRollout.maxConcurrent=3",
+         "--show-only", "templates/webhook/deployment.yaml"],
+        capture_output=True, text=True)
+    _check("[chart] webhook renders", r.returncode, 0)
+    _check("[chart] WEBHOOK_AUTO_ROLLOUT_MAX_CONCURRENT wired",
+           "WEBHOOK_AUTO_ROLLOUT_MAX_CONCURRENT" in r.stdout and '"3"' in r.stdout, True)
+    _check("[chart] WEBHOOK_AUTO_ROLLOUT_MIN_INTERVAL_SECONDS wired",
+           "WEBHOOK_AUTO_ROLLOUT_MIN_INTERVAL_SECONDS" in r.stdout, True)
+
+
+def section_git_push_rejection() -> None:
+    """gitops push rejection: a non-fast-forward is rebased and retried once;
+    any other rejection (protected branch, permissions) becomes one clear,
+    token-free error and a non-zero exit instead of a raw traceback that
+    crash-loops the Job."""
+    _section("gitops push rejection — rebase + retry once, clean failure otherwise")
+
+    import argparse as _argparse
+    import subprocess as _sp
+    import main as _main
+    from src.writeback_webhook import GitPushError, _push_with_rebase
+
+    def _cp(rc, err=""):
+        return _sp.CompletedProcess(args=[], returncode=rc, stdout="", stderr=err)
+
+    nff = (" ! [rejected]        main -> main (fetch first)\n"
+           "error: failed to push some refs to 'https://oauth2:s3cret@git.example/r.git'\n"
+           "hint: Updates were rejected because the remote contains work that you do\n")
+    calls: list = []
+
+    def _fake(seq):
+        it = iter(seq)
+
+        def _run(cmd, allow_nonzero=False, timeout=None):
+            calls.append(cmd[3:] if cmd[:2] == ["git", "-C"] else cmd)
+            return next(it)
+        return _run
+
+    calls.clear()
+    with patch("src.writeback_webhook._run", side_effect=_fake([_cp(1, nff), _cp(0), _cp(0), _cp(0)])):
+        _push_with_rebase("/repo", "main")
+    _check("[push] non-fast-forward → fetch, rebase onto the remote branch, push again",
+           calls, [["push", "origin", "main"], ["fetch", "origin", "main"],
+                   ["rebase", "origin/main"], ["push", "origin", "main"]])
+
+    calls.clear()
+    raised = None
+    with patch("src.writeback_webhook._run",
+               side_effect=_fake([_cp(1, nff), _cp(0), _cp(0), _cp(1, nff)])):
+        try:
+            _push_with_rebase("/repo", "main")
+        except GitPushError as exc:
+            raised = exc
+    _check("[push] second rejection after one rebase → GitPushError (bounded, no loop)",
+           raised is not None and len(calls), 4)
+
+    calls.clear()
+    raised = None
+    with patch("src.writeback_webhook._run",
+               side_effect=_fake([_cp(1, nff), _cp(0), _cp(1, "CONFLICT (content)"), _cp(0)])):
+        try:
+            _push_with_rebase("/repo", "main")
+        except GitPushError as exc:
+            raised = exc
+    _check("[push] rebase conflict → rebase aborted, GitPushError",
+           (raised is not None, calls[-1]), (True, ["rebase", "--abort"]))
+
+    prot = ("remote: GitLab: You are not allowed to push code to protected branches on this "
+            "project.\nTo https://oauth2:s3cret@git.example/r.git\n ! [remote rejected] main -> "
+            "main (pre-receive hook declined)\n")
+    calls.clear()
+    raised = None
+    with patch("src.writeback_webhook._run", side_effect=_fake([_cp(1, prot)])):
+        try:
+            _push_with_rebase("/repo", "main")
+        except GitPushError as exc:
+            raised = exc
+    _check("[push] protected branch → no rebase attempt", calls, [["push", "origin", "main"]])
+    msg = str(raised or "")
+    _check("[push] error names the branch and the likely fix",
+           "main" in msg and "createMr" in msg and "permission" in msg.lower(), True)
+    _check("[push] error never carries the token", "s3cret" in msg, False)
+
+    # cmd_sync turns the error into exit code 1, no traceback.
+    from src.config import Config as _Config, CrWritebackConfig as _CRW, ResourceConfig as _RC
+    from src.discovery import NamespaceTarget as _NsT
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    cfg = _Config(gitlab_url="", gitlab_token="", gitlab_username="",
+                  git_author_name="kru", git_author_email="kru@example", dry_run=False,
+                  create_mr=False, min_cpu_limit_m=0, min_memory_limit_mi=0,
+                  prometheus_url="http://prom:9090", resource=_RC(),
+                  cr_writeback=_CRW(repo_url="https://x/r.git", path="o"))
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                containers=[_CRec(container_name="app")])
+    with patch("main.Config") as mock_cfg_cls, patch("main._log_module.setup"), \
+         patch("main.load_config"), patch("main.log_git_credentials_state"), \
+         patch("main.list_enabled_namespaces", return_value=[_NsT(name="ns", annotations={})]), \
+         patch("main.list_workloads", return_value=[rec]), patch("main.client"), \
+         patch("main.build_provider"), \
+         patch("src.writeback_webhook.fetch_oom_state", return_value={}), \
+         patch("src.writeback_webhook.detect_oom_events", return_value={}), \
+         patch("main.write_back_webhook_all", side_effect=GitPushError("push rejected")):
+        mock_cfg_cls.load.return_value = cfg
+        try:
+            rc = _main.cmd_sync(_argparse.Namespace(mr=None))
+        except Exception as exc:  # noqa: BLE001
+            rc = f"raised {type(exc).__name__}"
+    _check("[push] cmd_sync returns 1 on a push failure instead of raising", rc, 1)
+
+
+def section_mr_work_branch() -> None:
+    """`config.mr.workBranch` — the MR/PR source branch is configurable so
+    several clusters can share one gitops repo without force-pushing over
+    each other's work branch. Default stays `resource-updater/sync`."""
+    _section("config.mr.workBranch — configurable MR source branch")
+
+    import subprocess as _sp
+    import tempfile as _tf
+    from src.config import Config as _Config, MrConfig
+    from src.writeback_webhook import WebhookEntry, _commit_repo
+
+    _check("[default] workBranch unchanged", MrConfig().work_branch, "resource-updater/sync")
+    with _tf.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        fh.write("config:\n  mr:\n    workBranch: resource-updater/cluster-a\n")
+        path = fh.name
+    _check("[config] workBranch read from the ConfigMap",
+           _Config.from_file(path).mr.work_branch, "resource-updater/cluster-a")
+    os.unlink(path)
+
+    def _rejects(branch, target="main"):
+        cfg = _base_config()
+        cfg.prometheus_url = "http://p"
+        cfg.gitlab_token = "t"
+        cfg.cr_writeback.branch = target
+        cfg.mr = MrConfig(work_branch=branch)
+        try:
+            cfg.validate()
+            return False
+        except SystemExit:
+            return True
+    _check("[validate] option-looking workBranch rejected", _rejects("--upload-pack=x"), True)
+    _check("[validate] workBranch equal to the target branch rejected (would force-push it)",
+           _rejects("main"), True)
+    _check("[validate] workBranch outside the resource-updater/ prefix rejected "
+           "(the tool force-pushes it — a human branch would be overwritten)",
+           _rejects("kru/cluster-a"), True)
+    _check("[validate] workBranch under resource-updater/ accepted",
+           _rejects("resource-updater/cluster-a"), False)
+    _check("[validate] bare prefix rejected", _rejects("resource-updater/"), True)
+
+    seen: list = []
+
+    def _run(cmd, allow_nonzero=False, timeout=None):
+        seen.append(cmd)
+        return _sp.CompletedProcess(cmd, 1 if "--quiet" in cmd else 0, "", "")
+
+    provider = MagicMock()
+    provider.has_credentials.return_value = True
+    provider.auth_url.side_effect = lambda u: u
+    provider.resolve_users.return_value = []
+    provider.open_or_update_pr.return_value = "https://git.example/r/-/merge_requests/1"
+    e = WebhookEntry(namespace="ns", cr_name="api", selector_labels={"app": "api"},
+                     containers=[{"name": "app", "requests": {"cpu": "100m"}}], create_mr=True)
+    with patch("src.writeback_webhook._run", side_effect=_run):
+        _commit_repo(repo_url="https://git.example/r.git", branch="main", path="o",
+                     entries=[e], provider=provider, git_author_name="k",
+                     git_author_email="k@e", mr_config=MrConfig(work_branch="resource-updater/cluster-a"))
+    checkout = [c for c in seen if "checkout" in c]
+    _check("[mr] work branch checked out from the configured name",
+           bool(checkout) and checkout[0][-2], "resource-updater/cluster-a")
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    if helm and os.path.isdir(_chart_dir()):
+        r = subprocess.run([helm, "template", "kru", _chart_dir(),
+                            "--set", "config.prometheusUrl=http://p:9090",
+                            "--set", "config.crWriteback.repoUrl=https://e/r.git",
+                            "--set", "config.crWriteback.path=o", "--set", "git.token=t",
+                            "--set", "config.mr.workBranch=feature/x"],
+                           capture_output=True, text=True)
+        _check("[chart] schema rejects a workBranch outside resource-updater/", r.returncode != 0, True)
+    _check("[mr] MR opened from the configured branch",
+           provider.open_or_update_pr.call_args.kwargs.get("source_branch"), "resource-updater/cluster-a")
+
+
+def section_github_status_wording() -> None:
+    """The GitHub provider's status wording matches what has been validated:
+    token (PAT) auth + the PR flow ran against a live repository; GitHub App
+    auth has only been mock-tested and stays alpha."""
+    _section("GitHub provider status wording")
+    import inspect
+    import src.git_provider as _gp
+    src_text = inspect.getsource(_gp)
+    _check("[wording] provider no longer called alpha as a whole",
+           "treat it as alpha" in src_text or "treat as alpha" in src_text, False)
+    _check("[wording] module states the PAT + PR flow was validated live",
+           "validated against a live GitHub repository" in (_gp.__doc__ or ""), True)
+    _check("[wording] GitHub App auth still flagged alpha",
+           "App" in (_gp.GitHubProvider.__doc__ or "") and "alpha" in (_gp.GitHubProvider.__doc__ or ""),
+           True)
+
+
+def section_dry_run_entry_keeps_committed_doc() -> None:
+    """A per-workload dryRun entry must not change git at all — including by
+    omission. The namespace file is rebuilt from the written entries, so a
+    dryRun workload's committed doc used to vanish from the file and the
+    GitOps engine then pruned its CR."""
+    _section("per-workload dryRun — committed CR doc carried forward, not dropped")
+
+    import subprocess as _sp
+    from src.git_provider import GitLabProvider as _GLP
+    from src.config import CrWritebackConfig as _CRW
+    from src.writeback_webhook import WebhookEntry, write_back_webhook_all
+
+    prior = (
+        "---\napiVersion: kube-resource-updater.io/v1\nkind: ResourceOverride\n"
+        "metadata:\n  name: api\n  namespace: ns\n  labels:\n"
+        "    app.kubernetes.io/managed-by: kube-resource-updater\n"
+        "spec:\n  selector:\n    matchLabels:\n      app: \"api\"\n  containers:\n"
+        "    - name: app\n      requests:\n        cpu: 100m\n"
+        "---\napiVersion: kube-resource-updater.io/v1\nkind: ResourceOverride\n"
+        "metadata:\n  name: worker\n  namespace: ns\n  labels:\n"
+        "    app.kubernetes.io/managed-by: kube-resource-updater\n"
+        "spec:\n  selector:\n    matchLabels:\n      app: \"worker\"\n  containers:\n"
+        "    - name: app\n      requests:\n        cpu: 300m\n"
+    )
+    written: dict = {}
+
+    def _run(cmd, allow_nonzero=False, timeout=None):
+        if cmd[:2] == ["git", "clone"]:
+            d = os.path.join(cmd[-1], "overrides")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "ns.resource-override.yaml"), "w") as fh:
+                fh.write(prior)
+        if "add" in cmd:
+            repo = cmd[2]
+            with open(os.path.join(repo, cmd[-1])) as fh:
+                written["content"] = fh.read()
+        if "rm" in cmd:
+            written["removed"] = cmd[-1]
+        return _sp.CompletedProcess(cmd, 1 if "--quiet" in cmd else 0, "", "")
+
+    def _e(name, cpu, dry):
+        return WebhookEntry(namespace="ns", cr_name=name, selector_labels={"app": name},
+                            containers=[{"name": "app", "requests": {"cpu": cpu}}],
+                            create_mr=False, dry_run=dry)
+
+    with patch("src.writeback_webhook._run", side_effect=_run), \
+         patch("src.writeback_webhook._build_entries",
+               return_value=([_e("api", "200m", False), _e("worker", "900m", True)], [])):
+        write_back_webhook_all(
+            workloads_with_configs=[(None, None)],
+            cr_writeback=_CRW(repo_url="https://git.example/r.git", path="overrides"),
+            provider=_GLP(gitlab_url="https://git.example", token="t", username=""),
+            git_author_name="k", git_author_email="k@e",
+        )
+    content = written.get("content", "")
+    _check("[dry-keep] written entry updated in the file", "cpu: 200m" in content, True)
+    _check("[dry-keep] dryRun workload's committed doc still in the file",
+           "name: worker" in content, True)
+    _check("[dry-keep] dryRun workload's doc carried verbatim (its new value not written)",
+           "cpu: 300m" in content and "cpu: 900m" not in content, True)
+    _check("[dry-keep] namespace file not pruned", written.get("removed"), None)
+
+
+def section_direct_prune_partial_failure() -> None:
+    """Direct-mode orphan deletion must survive PARTIAL failures.
+
+    Entries go missing for reasons that say nothing about the workload being
+    gone: a per-kind list error during discovery, a failed Prometheus query
+    leaving every container without values, a held container, a CR name that
+    is too long. Only a CR whose workload was genuinely not discovered (in a
+    namespace whose discovery and queries all succeeded), whose workload
+    carries `skip: "true"`, or whose namespace stopped opting in may go.
+    """
+    _section("direct mode — prune survives partial discovery / Prometheus failure")
+
+    import argparse as _argparse
+    from unittest.mock import MagicMock as _MM
+    import main as _main
+    from src import prometheus as _prom
+    from src.config import Config as _Config, CrWritebackConfig as _CRW, ResourceConfig as _RC
+    from src.discovery import NamespaceTarget as _NsT
+    from src.workload import (
+        ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec, list_workloads,
+    )
+    from src.writeback_webhook import (
+        PruneScope, WebhookEntry, _apply_direct, write_back_webhook_all,
+    )
+
+    # ── Prometheus query errors are recorded per namespace ──────────────
+    _prom.reset_query_errors()
+    with patch("src.prometheus.requests.get", side_effect=ConnectionError("down")):
+        _prom.query_cpu_request_m("http://p-err", "ns-prom", "app", "api", 0.9, "3d")
+    _check("[prom] failed value query records its namespace",
+           _prom.query_error_namespaces(), {"ns-prom"})
+    _prom.reset_query_errors()
+    _check("[prom] reset clears the record", _prom.query_error_namespaces(), set())
+
+    # ── Discovery reports namespaces with a per-kind list error ─────────
+    apps = _MM()
+
+    def _deps(ns):
+        if ns == "ns-broken":
+            raise RuntimeError("apiserver 500")
+        return _MM(items=[])
+    apps.list_namespaced_deployment.side_effect = _deps
+    apps.list_namespaced_stateful_set.return_value = _MM(items=[])
+    apps.list_namespaced_daemon_set.return_value = _MM(items=[])
+    failed: set = set()
+    list_workloads(apps, ["ns-ok", "ns-broken"], batch_api=_MM(), failed_namespaces=failed)
+    _check("[discovery] per-kind list error reported for its namespace", failed, {"ns-broken"})
+
+    # ── Prune decisions ─────────────────────────────────────────────────
+    def _item(ns, name):
+        return {"metadata": {"namespace": ns, "name": name,
+                             "labels": {"app.kubernetes.io/managed-by": "kube-resource-updater"}}}
+    items = [_item("ns", "api"), _item("ns", "held"), _item("ns", "gone"),
+             _item("ns", "skipped"), _item("ns-prom", "x"), _item("ns-broken", "y"),
+             _item("old-ns", "z")]
+    co = _MM()
+    co.api_client.call_api.side_effect = lambda *a, **k: {"spec": k["body"]["spec"],
+                                                           "metadata": {}}
+    co.list_cluster_custom_object.return_value = {"items": items}
+    entry = WebhookEntry(namespace="ns", cr_name="api", selector_labels={"app": "api"},
+                         containers=[{"name": "app", "requests": {"cpu": "1m"}}])
+    scope = PruneScope(keep={("ns", "api"), ("ns", "held")},
+                       blocked_namespaces={"ns-prom", "ns-broken"})
+    _apply_direct([entry], state_lookup={}, global_dry_run=False,
+                  custom_objects_api=co, core_v1_api=_MM(), prune_scope=scope)
+    deleted = sorted((c.args[2], c.args[4]) for c in co.delete_namespaced_custom_object.call_args_list)
+    _check("[prune] only genuinely-gone / opted-out / no-longer-opted-in CRs deleted",
+           deleted, [("ns", "gone"), ("ns", "skipped"), ("old-ns", "z")])
+
+    # ── write_back_webhook_all blocks namespaces whose queries failed ───
+    captured = {}
+
+    def _fake_apply(entries, **kw):
+        captured.update(kw)
+        return None
+
+    def _fake_build(*a, **k):
+        _prom._record_query_error("ns-prom")
+        return ([entry], [])
+
+    with patch("src.writeback_webhook._build_entries", side_effect=_fake_build), \
+         patch("src.writeback_webhook._apply_direct", side_effect=_fake_apply):
+        write_back_webhook_all(
+            workloads_with_configs=[(None, None)], cr_writeback=_CRW(), provider=None,
+            git_author_name="", git_author_email="", writeback_mode="direct",
+            custom_objects_api=co, core_v1_api=_MM(),
+            prune_scope=PruneScope(keep=set(), blocked_namespaces={"ns-broken"}),
+        )
+    blocked = captured.get("prune_scope").blocked_namespaces if captured.get("prune_scope") else set()
+    _check("[route] a namespace with a failed Prometheus query this sync is blocked from prune",
+           sorted(blocked), ["ns-broken", "ns-prom"])
+
+    # ── cmd_sync builds the scope from discovery ────────────────────────
+    cfg = _Config(gitlab_url="", gitlab_token="", gitlab_username="", git_author_name="k",
+                  git_author_email="k@e", dry_run=False, create_mr=True, min_cpu_limit_m=0,
+                  min_memory_limit_mi=0, prometheus_url="http://prom:9090", resource=_RC(),
+                  cr_writeback=_CRW(), writeback_mode="direct")
+    recs = [
+        _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+              containers=[_CRec(container_name="app")]),
+        _WRec(name="skipped", namespace="ns", target_kind="Deployment", target_name="skipped",
+              containers=[_CRec(container_name="app")],
+              annotations={"kube-resource-updater.skip": "true"}),
+    ]
+    got = {}
+
+    def _fake_list(apps_api, namespaces, batch_api=None, failed_namespaces=None):
+        if failed_namespaces is not None:
+            failed_namespaces.add("ns-broken")
+        return recs
+    with patch("main.Config") as mock_cfg_cls, patch("main._log_module.setup"), \
+         patch("main.load_config"), \
+         patch("main.list_enabled_namespaces", return_value=[_NsT(name="ns", annotations={}),
+                                                             _NsT(name="ns-broken", annotations={})]), \
+         patch("main.list_workloads", side_effect=_fake_list), patch("main.client"), \
+         patch("src.writeback_webhook.fetch_oom_state", return_value={}), \
+         patch("src.writeback_webhook.detect_oom_events", return_value={}), \
+         patch("main.write_back_webhook_all", side_effect=lambda **kw: got.update(kw)):
+        mock_cfg_cls.load.return_value = cfg
+        _main.cmd_sync(_argparse.Namespace(mr=None))
+    sc = got.get("prune_scope")
+    _check("[sync] discovered workloads are kept (bare and kind-prefixed CR names)",
+           bool(sc) and {("ns", "api"), ("ns", "deployment-api")} <= sc.keep, True)
+    _check("[sync] a workload with skip=true is not kept (explicit opt-out may be pruned)",
+           bool(sc) and ("ns", "skipped") in sc.keep, False)
+    _check("[sync] namespace with a discovery error is blocked from prune",
+           bool(sc) and "ns-broken" in sc.blocked_namespaces, True)
+
+
+def section_direct_live_state_failure() -> None:
+    """When the live ResourceOverrides of a namespace cannot be read, direct
+    mode must not act on that namespace at all: without the live CR it would
+    lose the cooldown, the growOnly/shrinkOnly and change-cap baselines and
+    previous-resources, and force-apply fresh values over an OOM-bumped CR."""
+    _section("direct mode — unreadable live CRs skip apply + prune for that namespace")
+
+    import argparse as _argparse
+    from unittest.mock import MagicMock as _MM
+    import main as _main
+    from kubernetes.client.rest import ApiException
+    from src.config import Config as _Config, CrWritebackConfig as _CRW, ResourceConfig as _RC
+    from src.discovery import NamespaceTarget as _NsT
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    from src.writeback_webhook import PruneScope, WebhookEntry, _apply_direct, fetch_oom_state
+
+    co = _MM()
+
+    def _list(group, version, namespace, plural):
+        if namespace == "ns-bad":
+            raise ApiException(status=503)
+        return {"items": []}
+    co.list_namespaced_custom_object.side_effect = _list
+    failed: set = set()
+    fetch_oom_state(co, ["ns-ok", "ns-bad"], failed_namespaces=failed)
+    _check("[fetch] namespace whose CR list failed is reported", failed, {"ns-bad"})
+
+    def _e(ns, name):
+        return WebhookEntry(namespace=ns, cr_name=name, selector_labels={"app": name},
+                            containers=[{"name": "app", "requests": {"cpu": "1m"}}])
+    co2 = _MM()
+    co2.api_client.call_api.side_effect = lambda *a, **k: {"spec": k["body"]["spec"], "metadata": {}}
+    co2.list_cluster_custom_object.return_value = {"items": [
+        {"metadata": {"namespace": "ns-bad", "name": "orphan",
+                      "labels": {"app.kubernetes.io/managed-by": "kube-resource-updater"}}}]}
+    _apply_direct([_e("ns-ok", "a"), _e("ns-bad", "b")], state_lookup={}, global_dry_run=False,
+                  custom_objects_api=co2, core_v1_api=_MM(),
+                  prune_scope=PruneScope(unreadable_namespaces={"ns-bad"}))
+    applied = [c.args[2]["namespace"] for c in co2.api_client.call_api.call_args_list]
+    _check("[apply] CRs in a namespace with unreadable live state are not applied",
+           applied, ["ns-ok"])
+    _check("[prune] nothing deleted in a namespace with unreadable live state",
+           co2.delete_namespaced_custom_object.called, False)
+
+    cfg = _Config(gitlab_url="", gitlab_token="", gitlab_username="", git_author_name="k",
+                  git_author_email="k@e", dry_run=False, create_mr=True, min_cpu_limit_m=0,
+                  min_memory_limit_mi=0, prometheus_url="http://prom:9090", resource=_RC(),
+                  cr_writeback=_CRW(), writeback_mode="direct")
+    rec = _WRec(name="a", namespace="ns-bad", target_kind="Deployment", target_name="a",
+                containers=[_CRec(container_name="app")])
+    got = {}
+
+    def _fake_fetch(api, namespaces, failed_namespaces=None):
+        if failed_namespaces is not None:
+            failed_namespaces.add("ns-bad")
+        return {}
+    with patch("main.Config") as mock_cfg_cls, patch("main._log_module.setup"), \
+         patch("main.load_config"), \
+         patch("main.list_enabled_namespaces", return_value=[_NsT(name="ns-bad", annotations={})]), \
+         patch("main.list_workloads", return_value=[rec]), patch("main.client"), \
+         patch("src.writeback_webhook.fetch_oom_state", side_effect=_fake_fetch), \
+         patch("src.writeback_webhook.detect_oom_events", return_value={}), \
+         patch("main.write_back_webhook_all", side_effect=lambda **kw: got.update(kw)):
+        mock_cfg_cls.load.return_value = cfg
+        _main.cmd_sync(_argparse.Namespace(mr=None))
+    sc = got.get("prune_scope")
+    _check("[sync] live-state read failure flows into the direct-mode scope",
+           bool(sc) and sc.unreadable_namespaces, {"ns-bad"})
+
+
+def section_rollout_tick_resilience() -> None:
+    """The rollout daemon thread must survive anything a tick throws — a
+    urllib3 connection error, a workload whose `.status` is still None —
+    instead of dying silently and never restarting another workload."""
+    _section("autoRollout — tick loop survives non-ApiException errors")
+
+    import datetime as _dt
+    import threading as _th
+    from unittest.mock import MagicMock as _MM
+    from src.webhook_cache import ContainerOverride, ResourceOverride
+    from src.webhook_rollout import RolloutTrigger
+
+    apps = _MM()
+    d = _MM()
+    d.metadata.name = "a"
+    d.metadata.annotations = {}
+    d.spec.template.metadata.labels = {"app": "a"}
+    apps.list_namespaced_deployment.return_value = _MM(items=[d])
+    apps.list_namespaced_stateful_set.return_value = _MM(items=[])
+    apps.list_namespaced_daemon_set.return_value = _MM(items=[])
+    ns_cache = _MM()
+    ns_cache.annotations.return_value = {}
+    t = RolloutTrigger(apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True,
+                       debounce_seconds=999, max_concurrent=1)
+    key = ("ns", "Deployment", "a")
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    # status None → not complete, no exception.
+    obj = _MM()
+    obj.status = None
+    obj.metadata.generation = 1
+    apps.read_namespaced_deployment.return_value = obj
+    try:
+        done = t._rollout_complete("ns", "Deployment", "a")
+        err = None
+    except Exception as exc:  # noqa: BLE001
+        done, err = None, exc
+    _check("[none-safe] workload with status=None → not complete, no exception",
+           (done, err), (False, None))
+
+    # Connection error during the in-flight refresh must not escape.
+    apps.read_namespaced_deployment.side_effect = ConnectionError("apiserver unreachable")
+    t._in_flight[key] = now
+    try:
+        t._fire_due()
+        escaped = None
+    except Exception as exc:  # noqa: BLE001
+        escaped = exc
+    _check("[tick] ConnectionError while reading rollout status does not escape _fire_due",
+           escaped, None)
+
+    # Connection error on the restart PATCH is retried like a transient API error.
+    t2 = RolloutTrigger(apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True,
+                        debounce_seconds=999, max_concurrent=0)
+    apps.patch_namespaced_deployment.side_effect = ConnectionError("reset")
+    t2.handle_event("ADDED", ResourceOverride(
+        namespace="ns", name="a", selector_match_labels={"app": "a"},
+        containers=(ContainerOverride(name="c", requests={"cpu": "1m"}, limits={}),)), None)
+    try:
+        t2._fire_due(force=True)
+        escaped = None
+    except Exception as exc:  # noqa: BLE001
+        escaped = exc
+    _check("[tick] ConnectionError on the restart PATCH does not escape", escaped, None)
+    _check("[tick] failed restart is re-queued for retry, not dropped", len(t2._pending), 1)
+    apps.patch_namespaced_deployment.side_effect = None
+
+    # The loop itself keeps going when a tick raises.
+    t3 = RolloutTrigger(apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True,
+                        debounce_seconds=1)
+    calls = {"n": 0}
+
+    def _boom(**_kw):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            t3._stop.set()
+        raise RuntimeError("unexpected")
+    t3._fire_due = _boom
+    t3._tick_interval = 0.01
+    th = _th.Thread(target=t3._tick_loop, daemon=True)
+    th.start()
+    th.join(timeout=3)
+    _check("[tick] loop survives a raising tick and keeps ticking", calls["n"] >= 2, True)
+    _check("[tick] loop exits on stop", th.is_alive(), False)
+
+
+
+def section_rollout_slot_release() -> None:
+    """A concurrency slot held by a rollout whose status cannot be read (or
+    that is stuck) is released after `rolloutTimeoutSeconds` (configurable)
+    or after 3 consecutive read errors, whichever comes first."""
+    _section("autoRollout — slot release (timeout + consecutive read errors)")
+
+    import datetime as _dt
+    from unittest.mock import MagicMock as _MM
+    from src.webhook_rollout import RolloutTrigger
+    apps = _MM()
+    ns_cache = _MM()
+    key = ("ns", "Deployment", "a")
+    # ── slot release: configurable timeout + consecutive read errors ────
+    t4 = RolloutTrigger(apps_api=apps, ns_cache=ns_cache, helm_default_enabled=True,
+                        max_concurrent=1, rollout_timeout_seconds=120)
+    _check("[timeout] rolloutTimeoutSeconds is configurable",
+           t4._rollout_timeout.total_seconds(), 120.0)
+    from kubernetes.client.rest import ApiException
+    apps.read_namespaced_deployment.side_effect = ApiException(status=500)
+    t4._in_flight[key] = _dt.datetime.now(_dt.timezone.utc)
+    for _ in range(2):
+        t4._refresh_in_flight(_dt.datetime.now(_dt.timezone.utc))
+    _check("[errors] two consecutive read errors keep the slot", key in t4._in_flight, True)
+    t4._refresh_in_flight(_dt.datetime.now(_dt.timezone.utc))
+    _check("[errors] third consecutive read error releases the slot", key in t4._in_flight, False)
+    apps.read_namespaced_deployment.side_effect = None
+
+    import shutil
+    import subprocess
+    helm = shutil.which("helm")
+    chart_dir = _chart_dir()
+    if helm and os.path.isdir(chart_dir):
+        r = subprocess.run(
+            [helm, "template", "kru", chart_dir, "--set", "config.prometheusUrl=http://p:9090",
+             "--set", "config.writebackMode=direct", "--set", "webhook.enabled=true",
+             "--set", "webhook.autoRollout.enabled=true",
+             "--set", "webhook.autoRollout.rolloutTimeoutSeconds=300",
+             "--show-only", "templates/webhook/deployment.yaml"],
+            capture_output=True, text=True)
+        _check("[chart] WEBHOOK_AUTO_ROLLOUT_TIMEOUT_SECONDS wired",
+               "WEBHOOK_AUTO_ROLLOUT_TIMEOUT_SECONDS" in r.stdout and '"300"' in r.stdout, True)
+
+
+def section_direct_foreign_ownership() -> None:
+    """Direct mode must not silently take a CR away from another controller.
+
+    If a field manager other than `kube-resource-updater` owns `spec` (the CR
+    is still in an Argo CD Application, or was hand-applied), a forced apply
+    would steal it and the two would fight. Such CRs are skipped — for apply
+    and for orphan deletion — with an error, unless
+    `config.direct.adoptForeignCRs: true` is set for a deliberate migration.
+    Only tracking metadata is stripped; operator-set Argo CD options stay.
+    """
+    _section("direct mode — foreign spec ownership + tracking-only strip")
+
+    import tempfile as _tf
+    from unittest.mock import MagicMock as _MM
+    from src.config import Config as _Config
+    from src.writeback_webhook import WebhookEntry, _apply_direct, _argocd_tracking_metadata
+
+    with _tf.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        fh.write("config:\n  direct:\n    adoptForeignCRs: true\n")
+        path = fh.name
+    _check("[config] adoptForeignCRs read from config.direct", _Config.from_file(path).direct_adopt_foreign_crs, True)
+    os.unlink(path)
+    _check("[config] adoptForeignCRs defaults to false", _base_config().direct_adopt_foreign_crs, False)
+
+    argo_spec = [{"manager": "argocd-controller", "operation": "Apply",
+                  "fieldsV1": {"f:spec": {"f:containers": {}}}}]
+    live = {"containers": {"app": {"requests": {"cpu": "100m"}}}, "annotations": {},
+            "labels": {}, "managed_fields": argo_spec, "selector": {"app": "api"}, "uid": "u"}
+    e = WebhookEntry(namespace="ns", cr_name="api", selector_labels={"app": "api"},
+                     containers=[{"name": "app", "requests": {"cpu": "200m"}}])
+
+    def _run(adopt, state, items=None, entries=None):
+        co = _MM()
+        co.api_client.call_api.side_effect = lambda *a, **k: {"spec": k["body"]["spec"], "metadata": {}}
+        co.list_cluster_custom_object.return_value = {"items": items or []}
+        _apply_direct(entries or [e], state_lookup=state, global_dry_run=False,
+                      custom_objects_api=co, core_v1_api=_MM(), adopt_foreign=adopt)
+        return co
+
+    co = _run(False, {("ns", "api"): live})
+    _check("[foreign] spec owned by another manager → apply skipped", co.api_client.call_api.called, False)
+    co = _run(True, {("ns", "api"): live})
+    _check("[foreign] adoptForeignCRs=true → apply proceeds (deliberate migration)",
+           co.api_client.call_api.called, True)
+    own = dict(live, managed_fields=[{"manager": "kube-resource-updater", "operation": "Update",
+                                      "fieldsV1": {"f:spec": {}}}])
+    co = _run(False, {("ns", "api"): own})
+    _check("[foreign] the tool's own manager (Apply or Update) is not foreign",
+           co.api_client.call_api.called, True)
+    meta_only = dict(live, managed_fields=[{"manager": "kubectl-annotate", "fieldsV1": {
+        "f:metadata": {"f:annotations": {"f:team": {}}}}}])
+    co = _run(False, {("ns", "api"): meta_only})
+    _check("[foreign] another manager owning only metadata does not block",
+           co.api_client.call_api.called, True)
+    orphan = {"metadata": {"namespace": "ns", "name": "old",
+                           "labels": {"app.kubernetes.io/managed-by": "kube-resource-updater"},
+                           "managedFields": argo_spec}}
+    co = _run(False, {}, items=[orphan])
+    _check("[foreign] orphan whose spec another manager owns is not deleted",
+           co.delete_namespaced_custom_object.called, False)
+
+    anns, _labels = _argocd_tracking_metadata({"annotations": {
+        "argocd.argoproj.io/tracking-id": "x", "argocd.argoproj.io/sync-options": "Prune=false",
+        "argocd.argoproj.io/compare-options": "IgnoreExtraneous"}})
+    _check("[strip] only the tracking-id annotation is stripped (operator options kept)",
+           anns, ["argocd.argoproj.io/tracking-id"])
+
+
+def section_emit_cpu_limits_empty_limits() -> None:
+    """emitCpuLimits=false when the CR ends up with NO limits at all (e.g. no
+    memory data): the CR carries an explicit `limits: {}` and the webhook
+    removes the pod's limits sub-tree, so a template `limits.cpu` cannot
+    survive. A CR that simply omits `limits` (hand-written, requests-only)
+    still leaves the pod's limits alone."""
+    _section("emitCpuLimits — explicit empty limits remove the pod's CPU limit")
+
+    from types import SimpleNamespace
+    from src.webhook_cache import _parse
+    from src.webhook_patch import build_patches, patches_to_jsonpatch
+    from src.workload import ContainerRecommendation as _CRec, WorkloadRecommendation as _WRec
+    from src.writeback_webhook import WebhookEntry, _build_containers_payload, _render_cr_doc
+
+    cfg = _base_config()
+    cfg.prometheus_url = "http://prom:9090"
+    cfg.resource.emit_cpu_limits = False
+    rec = _WRec(name="api", namespace="ns", target_kind="Deployment", target_name="api",
+                containers=[_CRec(container_name="app")])
+    cpu_only = SimpleNamespace(cpu_request_m=200, memory_request_bytes=None,
+                               cpu_limit_m=800, memory_limit_bytes=None)
+    with _no_health_gate(), patch("src.writeback_webhook._query_prom_values", return_value=cpu_only):
+        payload, _a, _h = _build_containers_payload(rec, cfg, oom_state=None, oom_events={},
+                                                   oom_eligible=False, health_gate_enabled=False)
+    _check("[payload] emitCpuLimits=false + no other limit → explicit empty limits",
+           payload[0].get("limits", "ABSENT") if payload else "NO PAYLOAD", {})
+    doc = _render_cr_doc(WebhookEntry(namespace="ns", cr_name="api", selector_labels={"app": "api"},
+                                      containers=payload), None)
+    _check("[render] rendered CR keeps `limits: {}`",
+           doc["spec"]["containers"][0].get("limits", "ABSENT"), {})
+
+    def _ro(container):
+        return _parse({"metadata": {"namespace": "ns", "name": "api"},
+                       "spec": {"selector": {"matchLabels": {"app": "api"}},
+                                "containers": [container]}})
+    pod = {"metadata": {"namespace": "ns", "annotations": {"x": "y"}},
+           "spec": {"containers": [{"name": "app", "resources": {
+               "requests": {"cpu": "1"}, "limits": {"cpu": "2"}}}]}}
+    ops = patches_to_jsonpatch(build_patches(pod, [_ro(
+        {"name": "app", "requests": {"cpu": "200m"}, "limits": {}})]))
+    _check("[webhook] explicit empty limits → limits sub-tree removed",
+           [o for o in ops if o["path"].endswith("/resources/limits")],
+           [{"op": "remove", "path": "/spec/containers/0/resources/limits"}])
+    ops = patches_to_jsonpatch(build_patches(pod, [_ro(
+        {"name": "app", "requests": {"cpu": "200m"}})]))
+    _check("[webhook] CR without a limits key (requests-only) leaves pod limits alone",
+           [o for o in ops if o["path"].endswith("/resources/limits")], [])
+
+
+def section_restart_query_retry() -> None:
+    """The crash-loop gate fails closed on a missing restart signal, so one
+    transient Prometheus error must not freeze every container: the restart
+    query retries once, and the hold says WHICH case it is — the query failed
+    vs the series is genuinely absent."""
+    _section("restart-count query — retry once, distinguish query-error from no-series")
+
+    import contextlib
+    from src import prometheus as _prom
+    from src.config import ResourceConfig
+    from src.health import assess_container
+
+    class _Resp:
+        def __init__(self, result):
+            self._r = result
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": {"result": self._r}}
+
+    def _seq(*items):
+        it = iter(items)
+
+        def _get(url, params=None, timeout=None):
+            v = next(it)
+            if isinstance(v, Exception):
+                raise v
+            return v
+        return _get
+
+    _prom._restart_cache.clear()
+    calls = _seq(ConnectionError("blip"), _Resp([{"value": [0, "2"]}]))
+    with patch("src.prometheus.requests.get", side_effect=calls) as g:
+        n = _prom.query_restart_count("http://p-retry", "ns", "c", "w", "3d")
+    _check("[retry] one transient error then success → value returned", n, 2)
+    _check("[retry] exactly one retry", g.call_count, 2)
+    _check("[retry] status ok", _prom.restart_signal_status("http://p-retry", "ns", "c", "w", "3d"), "ok")
+
+    _prom._restart_cache.clear()
+    with patch("src.prometheus.requests.get",
+               side_effect=_seq(ConnectionError("a"), ConnectionError("b"))) as g:
+        n = _prom.query_restart_count("http://p-retry", "ns", "c", "w", "3d")
+    _check("[retry] still failing after the retry → None (fail closed)", n, None)
+    _check("[retry] no retry storm (2 calls total)", g.call_count, 2)
+    _check("[retry] status query-error",
+           _prom.restart_signal_status("http://p-retry", "ns", "c", "w", "3d"), "query-error")
+
+    _prom._restart_cache.clear()
+    with patch("src.prometheus.requests.get", side_effect=_seq(_Resp([]))) as g:
+        n = _prom.query_restart_count("http://p-retry", "ns", "c", "w", "3d")
+    _check("[no-series] empty result is not retried", (n, g.call_count), (None, 1))
+    _check("[no-series] status no-series",
+           _prom.restart_signal_status("http://p-retry", "ns", "c", "w", "3d"), "no-series")
+
+    rc = ResourceConfig()
+
+    def _assess(status):
+        with contextlib.ExitStack() as st:
+            st.enter_context(patch("src.health.query_restart_count", return_value=None))
+            st.enter_context(patch("src.health.restart_signal_status", return_value=status))
+            st.enter_context(patch("src.health.query_cpu_sample_count", return_value=4320))
+            st.enter_context(patch("src.health.query_mem_sample_count", return_value=2304))
+            return assess_container("http://p", "ns", "c", "w", rc)
+    v_err, v_none = _assess("query-error"), _assess("no-series")
+    _check("[detail] query error → still held (fail closed)", v_err.held, True)
+    _check("[detail] query error named in the hold detail", "query failed" in v_err.detail, True)
+    _check("[detail] absent series named in the hold detail", "no data" in v_none.detail, True)
+
+
+def section_direct_delete_paths() -> None:
+    """Direct-mode RBAC is cluster-wide (namespaces opt in dynamically), so
+    every delete path must re-check the managed-by label on the object it is
+    about to delete — the listed object itself, never a cached name."""
+    _section("direct mode — every delete re-checks managed-by on the object")
+    import glob
+    calls = []
+    for f in sorted(glob.glob(os.path.join(os.path.dirname(__file__), "..", "src", "*.py"))):
+        with open(f, encoding="utf-8") as fh:
+            for line in fh:
+                if "delete_namespaced_custom_object(" in line or "delete_cluster_custom_object(" in line:
+                    calls.append(os.path.basename(f))
+    _check("[delete] exactly one CR delete call site (the orphan prune)", calls, ["writeback_webhook.py"])
+    import inspect
+    from src.writeback_webhook import _prune_orphan_crs
+    src_text = inspect.getsource(_prune_orphan_crs)
+    i_label = src_text.find('get(MANAGED_BY_LABEL) != MANAGED_BY_VALUE')
+    i_del = src_text.find("delete_namespaced_custom_object(")
+    _check("[delete] the label check on the listed object precedes the delete",
+           0 <= i_label < i_del, True)
+
+
+def section_gitops_unreadable_live_state() -> None:
+    """gitops mode: a namespace whose live CRs could not be read must not be
+    rendered without its baseline (cooldown, growOnly/shrinkOnly, change
+    cap). Its committed file is left untouched — not rewritten and not
+    pruned — for that sync."""
+    _section("gitops — unreadable live CRs leave that namespace's file untouched")
+
+    import subprocess as _sp
+    from src.config import CrWritebackConfig as _CRW
+    from src.git_provider import GitLabProvider as _GLP
+    from src.writeback_webhook import PruneScope, WebhookEntry, write_back_webhook_all
+
+    def _doc(ns, name, cpu):
+        return ("---\napiVersion: kube-resource-updater.io/v1\nkind: ResourceOverride\n"
+                f"metadata:\n  name: {name}\n  namespace: {ns}\n  labels:\n"
+                "    app.kubernetes.io/managed-by: kube-resource-updater\n"
+                f"spec:\n  selector:\n    matchLabels:\n      app: \"{name}\"\n"
+                f"  containers:\n    - name: app\n      requests:\n        cpu: {cpu}\n")
+    added, removed = [], []
+
+    def _run(cmd, allow_nonzero=False, timeout=None):
+        if cmd[:2] == ["git", "clone"]:
+            d = os.path.join(cmd[-1], "overrides")
+            os.makedirs(d, exist_ok=True)
+            for ns in ("ns-ok", "ns-bad", "ns-gone"):
+                with open(os.path.join(d, f"{ns}.resource-override.yaml"), "w") as fh:
+                    fh.write(_doc(ns, "api", "100m"))
+        if "add" in cmd:
+            added.extend(cmd[cmd.index("--") + 1:])
+        if "rm" in cmd:
+            removed.extend(cmd[cmd.index("--") + 1:])
+        return _sp.CompletedProcess(cmd, 1 if "--quiet" in cmd else 0, "", "")
+
+    def _e(ns):
+        return WebhookEntry(namespace=ns, cr_name="api", selector_labels={"app": "api"},
+                            containers=[{"name": "app", "requests": {"cpu": "900m"}}],
+                            create_mr=False)
+
+    with patch("src.writeback_webhook._run", side_effect=_run), \
+         patch("src.writeback_webhook._build_entries",
+               return_value=([_e("ns-ok"), _e("ns-bad")], [])):
+        write_back_webhook_all(
+            workloads_with_configs=[(None, None)],
+            cr_writeback=_CRW(repo_url="https://git.example/r.git", path="overrides"),
+            provider=_GLP(gitlab_url="https://git.example", token="t", username=""),
+            git_author_name="k", git_author_email="k@e",
+            prune_scope=PruneScope(unreadable_namespaces={"ns-bad"}),
+        )
+    _check("[gitops-unreadable] readable namespace still rewritten",
+           "overrides/ns-ok.resource-override.yaml" in added, True)
+    _check("[gitops-unreadable] unreadable namespace's file not rewritten",
+           "overrides/ns-bad.resource-override.yaml" in added, False)
+    _check("[gitops-unreadable] unreadable namespace's file not pruned",
+           "overrides/ns-bad.resource-override.yaml" in removed, False)
+    _check("[gitops-unreadable] genuine orphan file still pruned",
+           "overrides/ns-gone.resource-override.yaml" in removed, True)
 
 
 def section_overrides_unit_file() -> None:
@@ -11271,6 +13188,26 @@ def main() -> int:
     section_public_readiness_code_fixes()
     section_public_readiness_chart_fixes()
     section_health_gate()
+    section_grow_shrink_baseline_always_fetched()
+    section_emit_cpu_limits()
+    section_max_change_cap()
+    section_change_audit_and_cooldown()
+    section_writeback_direct_mode()
+    section_cronjob_suspend()
+    section_rollout_replay_and_concurrency()
+    section_git_push_rejection()
+    section_mr_work_branch()
+    section_github_status_wording()
+    section_dry_run_entry_keeps_committed_doc()
+    section_direct_prune_partial_failure()
+    section_direct_live_state_failure()
+    section_rollout_tick_resilience()
+    section_rollout_slot_release()
+    section_direct_foreign_ownership()
+    section_emit_cpu_limits_empty_limits()
+    section_restart_query_retry()
+    section_direct_delete_paths()
+    section_gitops_unreadable_live_state()
     section_overrides_unit_file()
     live_rc = section_live_prometheus()
 

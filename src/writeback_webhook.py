@@ -19,6 +19,7 @@ All file/git plumbing is shared with src/writeback.py via helper imports.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -67,6 +68,81 @@ CR_FILE_SUFFIX = ".resource-override.yaml"
 # webhook server's expectations (src/webhook_cache.py).
 CR_API_VERSION = "kube-resource-updater.io/v1"
 CR_KIND = "ResourceOverride"
+CR_GROUP = "kube-resource-updater.io"
+CR_VERSION = "v1"
+CR_PLURAL = "resourceoverrides"
+
+# Label every tool-rendered CR carries; the ownership marker for pruning.
+MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
+MANAGED_BY_VALUE = "kube-resource-updater"
+
+# Server-side-apply field manager for direct write-back.
+FIELD_MANAGER = "kube-resource-updater"
+
+# ArgoCD tracking metadata. See `_argocd_tracking_metadata` for the strip rule.
+ARGOCD_TRACKING_ID_ANNOTATION = "argocd.argoproj.io/tracking-id"
+ARGOCD_INSTANCE_LABEL = "app.kubernetes.io/instance"
+
+
+# Change-audit annotations, written on the CR every time its container
+# resources change: when (RFC3339) and what they were before (compact JSON,
+# `{container: {"requests": {...}, "limits": {...}}}`). The cooldown reads
+# `last-changed` back from the live CR.
+LAST_CHANGED_ANNOTATION = "kube-resource-updater.io/last-changed"
+PREVIOUS_RESOURCES_ANNOTATION = "kube-resource-updater.io/previous-resources"
+
+
+def _utcnow() -> datetime:
+    """Current UTC time — one seam so tests can pin the clock."""
+    return datetime.now(timezone.utc)
+
+
+def _rfc3339(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_rfc3339(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _containers_index(containers) -> dict[str, dict]:
+    """Normalise a CR `containers` list to `{name: {"requests", "limits"}}`
+    with string values and empty sections dropped — the comparison and the
+    previous-resources serialisation both use this shape."""
+    out: dict[str, dict] = {}
+    for c in containers or []:
+        if not isinstance(c, dict) or not c.get("name"):
+            continue
+        entry: dict = {}
+        for section in ("requests", "limits"):
+            vals = {str(k): str(v) for k, v in (c.get(section) or {}).items()}
+            if vals:
+                entry[section] = vals
+        out[str(c["name"])] = entry
+    return out
+
+
+def _compact_resources_json(containers) -> str:
+    return json.dumps(_containers_index(containers), separators=(",", ":"), sort_keys=True)
+
+
+def _stamp_change_audit(annotations: dict, new_containers, old_containers, *, existed: bool) -> bool:
+    """Update `annotations` in place when the resources changed. Returns True
+    on a change. Unchanged → annotations are left exactly as carried."""
+    if existed and _containers_index(new_containers) == _containers_index(old_containers):
+        return False
+    annotations[LAST_CHANGED_ANNOTATION] = _rfc3339(_utcnow())
+    if existed:
+        annotations[PREVIOUS_RESOURCES_ANNOTATION] = _compact_resources_json(old_containers)
+    else:
+        annotations.pop(PREVIOUS_RESOURCES_ANNOTATION, None)
+    return True
 
 
 # MR description size cap (bytes). GitLab rejects descriptions > 1 MiB with
@@ -126,6 +202,25 @@ class WebhookEntry:
     dry_run: bool = False
 
 
+@dataclass
+class PruneScope:
+    """What direct-mode orphan deletion may touch this sync.
+
+    `keep`: `(namespace, cr_name)` of every workload discovery found —
+    whether or not it produced an entry (held, no Prometheus data, name too
+    long). Both the bare and the kind-prefixed CR name are listed, so a
+    later collision rename never reads as "gone". Workloads with
+    `skip: "true"` are left out on purpose: that is an explicit opt-out.
+    `blocked_namespaces`: discovery or a value query failed there this
+    sync — nothing in them is deleted.
+    """
+    keep: set[tuple[str, str]] = field(default_factory=set)
+    blocked_namespaces: set[str] = field(default_factory=set)
+    # Live CRs could not be read here: no apply (no baseline for cooldown,
+    # growOnly / shrinkOnly, the change cap or previous-resources) and no prune.
+    unreadable_namespaces: set[str] = field(default_factory=set)
+
+
 @dataclass(frozen=True)
 class HeldContainer:
     """One container whose recommendation a sample-quality gate held back.
@@ -147,7 +242,7 @@ class HeldContainer:
 def write_back_webhook_all(
     workloads_with_configs: list[tuple[WorkloadRecommendation, Config]],
     cr_writeback: CrWritebackConfig,
-    provider: GitProvider,
+    provider: GitProvider | None,
     git_author_name: str,
     git_author_email: str,
     dry_run: bool = False,
@@ -159,8 +254,17 @@ def write_back_webhook_all(
     oom_floor_reset_lookup: dict[tuple[str, str], bool] | None = None,
     health_gate_lookup: dict[tuple[str, str], bool] | None = None,
     auto_rollout_by_namespace: dict[str, bool] | None = None,
+    writeback_mode: str = "gitops",
+    custom_objects_api=None,
+    core_v1_api=None,
+    prune_scope: PruneScope | None = None,
+    adopt_foreign_crs: bool = False,
 ) -> list[tuple[str, list[str]]] | None:
     """Generate ResourceOverride CR files and commit them to the configured central repo.
+
+    With `writeback_mode="direct"` the same entries are server-side applied
+    to the cluster API instead (see `_apply_direct`); `provider` and the git
+    arguments are unused and may be None / empty.
 
     `workloads_with_configs` is the output of the resolver: each workload has its
     own effective `Config` already (helm defaults + namespace annotations + workload
@@ -188,6 +292,10 @@ def write_back_webhook_all(
 
     # Compute the CR payloads up front (no git I/O yet). This means dry-run can show
     # the full set of files that *would* be written without cloning anything.
+    # Query errors are tracked per namespace across the build so direct mode
+    # can tell "no value" from "query failed".
+    from src.prometheus import query_error_namespaces, reset_query_errors
+    reset_query_errors()
     entries, held_report = _build_entries(
         workloads_with_configs,
         oom_state_lookup=oom_state_lookup,
@@ -212,6 +320,34 @@ def write_back_webhook_all(
     # each pair's Config.dry_run, so the per-entry value inherits the cluster
     # default. Keeping the global OR preserves the existing --dry-run CLI /
     # cluster-ConfigMap behavior (set once, covers everything).
+    if writeback_mode == "direct":
+        scope = prune_scope or PruneScope()
+        failed_queries = query_error_namespaces()
+        if failed_queries:
+            _log.warning("[direct] Prometheus queries failed in %s — no orphan deletion "
+                         "there this sync", ", ".join(sorted(failed_queries)))
+        scope = PruneScope(keep=set(scope.keep),
+                           blocked_namespaces=set(scope.blocked_namespaces) | failed_queries,
+                           unreadable_namespaces=set(scope.unreadable_namespaces))
+        return _apply_direct(
+            entries,
+            state_lookup=oom_state_lookup or {},
+            global_dry_run=dry_run,
+            custom_objects_api=custom_objects_api,
+            core_v1_api=core_v1_api,
+            prune_scope=scope,
+            adopt_foreign=adopt_foreign_crs,
+        )
+
+    # A namespace whose live CRs could not be read has no baseline (cooldown,
+    # growOnly / shrinkOnly, change cap): its committed file is left exactly
+    # as it is this sync — not re-rendered and not pruned.
+    unreadable = set(prune_scope.unreadable_namespaces) if prune_scope else set()
+    for ns in sorted({e.namespace for e in entries} & unreadable):
+        _log.warning("[gitops] live ResourceOverrides in %s could not be read — leaving its "
+                     "committed file untouched this sync (no baseline to compare against)", ns)
+    entries = [e for e in entries if e.namespace not in unreadable]
+
     dry_entries = [e for e in entries if e.dry_run or dry_run]
     write_entries = [e for e in entries if not (e.dry_run or dry_run)]
 
@@ -248,6 +384,8 @@ def write_back_webhook_all(
         mr_config=mr_config,
         auto_rollout_by_namespace=auto_rollout_by_namespace,
         held_report=held_report,
+        preserve_entries=dry_entries,
+        untouched_namespaces=unreadable,
     )
     return results or None
 
@@ -443,6 +581,7 @@ def fetch_oom_floors(
 def fetch_oom_state(
     custom_objects_api,
     namespaces: list[str],
+    failed_namespaces: "set[str] | None" = None,
 ) -> dict[tuple[str, str], dict]:
     """Bundle apiserver-source CR state per workload.
 
@@ -475,6 +614,8 @@ def fetch_oom_state(
                 "skipping floor enforcement / dedupe / grow-shrink for this namespace.",
                 ns, exc,
             )
+            if failed_namespaces is not None:
+                failed_namespaces.add(ns)
             continue
         for cr in result.get("items") or []:
             meta = cr.get("metadata") or {}
@@ -496,10 +637,9 @@ def fetch_oom_state(
                 cname = c.get("name")
                 if not cname:
                     continue
-                containers[cname] = {
-                    "requests": dict(c.get("requests") or {}),
-                    "limits":   dict(c.get("limits") or {}),
-                }
+                containers[cname] = {"requests": dict(c.get("requests") or {})}
+                if "limits" in c:
+                    containers[cname]["limits"] = dict(c.get("limits") or {})
             out[(ns, cr_name)] = {
                 "floor": parse_oom_floors_from_annotations(anns),
                 "last_event": parse_oom_last_events_from_annotations(anns),
@@ -511,6 +651,13 @@ def fetch_oom_state(
                 "annotations": dict(anns),
                 "labels": dict(meta.get("labels") or {}),
                 "containers": containers,
+                # Direct write-back reads these to decide whether the CR
+                # changed, which tracking metadata to strip, and which
+                # object an Event refers to.
+                "selector": dict((spec.get("selector") or {}).get("matchLabels") or {}),
+                "managed_fields": list(meta.get("managedFields") or []),
+                "uid": meta.get("uid", ""),
+                "resource_version": meta.get("resourceVersion", ""),
             }
     return out
 
@@ -964,23 +1111,50 @@ def _build_containers_payload(
     out_history = dict(prior_history)
     out_investigation = dict(prior_investigation)
 
+    # Cooldown: a workload whose CR changed less than `cooldown_hours` ago
+    # keeps its current values; only OOM-driven changes still apply (the
+    # bump below runs on top of the preserved values).
+    in_cooldown = False
+    if rc.cooldown_hours > 0:
+        last_changed = _parse_rfc3339(
+            ((oom_state or {}).get("annotations") or {}).get(LAST_CHANGED_ANNOTATION))
+        if last_changed is not None:
+            age_h = (_utcnow() - last_changed).total_seconds() / 3600
+            in_cooldown = age_h < rc.cooldown_hours
+            if in_cooldown:
+                _log.info(
+                    "  [cooldown] %s/%s: last changed %s (%.1fh ago, cooldown %gh) — "
+                    "keeping current values; only OOM-driven changes apply",
+                    rec.namespace, rec.target_name, _rfc3339(last_changed),
+                    age_h, rc.cooldown_hours,
+                )
+
     payload: list[dict] = []
     held: dict[str, str] = {}
     for c in kept:
+        cooled = prev_res_lookup.get(c.container_name) if in_cooldown else None
         # ── (0) Sample-quality gates ──────────────────────────────────────
         # Runs BEFORE the value queries. A percentile computed from a
         # crash-looping pod's failed-startup bursts, or from a handful of
         # samples, is not a recommendation — it's noise that the admission
         # webhook would then re-apply on every restart without ever
         # recomputing, so an undersized CR keeps the workload restarting
-        # and keeps the samples bad.
+        # and keeps the samples bad. Skipped in cooldown: nothing is
+        # recomputed from the window there.
         verdict = (
             assess_container(cfg.prometheus_url, rec.namespace, c.container_name,
                              rec.target_name, rc)
-            if health_gate_enabled and cfg.prometheus_url
+            if health_gate_enabled and cfg.prometheus_url and not cooled
             else NOT_HELD
         )
-        if verdict.held:
+        if cooled:
+            # Cooldown: start from the values pods run with today. Steps
+            # (2)-(5) still run, so a fresh OOM bumps memory on top.
+            res = {
+                "requests": dict(cooled.get("requests") or {}),
+                "limits": dict(cooled.get("limits") or {}),
+            }
+        elif verdict.held:
             held[c.container_name] = verdict.detail
             # PRESERVE, don't prune. Dropping the container here (and with
             # it, possibly the whole entry) would remove the CR doc from the
@@ -1174,10 +1348,41 @@ def _build_containers_payload(
                 rec, c.container_name, res_pre_clamp, res, cfg.grow_only, cfg.shrink_only,
             )
 
+        # ── (4b) Per-sync change cap vs the current baseline ──────────────
+        # Baseline = live CR (what pods are admitted with), else the pod
+        # template, else nothing to compare against. OOM-driven memory growth
+        # (fresh bump or sticky floor) is exempt on the way up: an OOMing pod
+        # cannot wait several syncs.
+        if rc.max_change_percent > 0:
+            cap_baseline = old_res or (getattr(c, "template_resources", None) or None)
+            if cap_baseline:
+                res_pre_cap = res
+                res = _apply_max_change(
+                    res, cap_baseline, rc.max_change_percent,
+                    # A sticky OOM floor is the same signal one sync later —
+                    # capping below it would re-create the OOM.
+                    exempt_memory_up=oom_bump_attempted or bool(
+                        oom_floor_enabled and prior_floor.get(c.container_name)),
+                    bounds=bounds,
+                )
+                if res != res_pre_cap:
+                    _log.info(
+                        "  [max-change] %s/%s/%s: change capped at %g%% of the current "
+                        "values (%s → %s)",
+                        rec.namespace, rec.target_name, c.container_name,
+                        rc.max_change_percent, _res_brief(res_pre_cap), _res_brief(res),
+                    )
+
         # ── (5) Final floors/ceilings pass ─────────────────────────────────
         # Hard invariants always win. If grow/shrink kept a value below the
         # floor or above the ceiling, this clamps it back into bounds.
         res = _enforce_floors(res, bounds)
+
+        # ── (5b) CPU-limit emission policy ────────────────────────────────
+        # Applied last so no earlier step (Prometheus, cold-start synthesis,
+        # grow/shrink carrying the old CR value) can reintroduce it.
+        if not rc.emit_cpu_limits:
+            res = _drop_cpu_limit(res)
 
         # ── (6) OOM bump suppression detection ────────────────────────────
         # Did the OOM bump's intended lim survive grow/shrink + final floors?
@@ -1251,6 +1456,10 @@ def _build_containers_payload(
             entry["requests"] = dict(requests)
         if limits:
             entry["limits"] = dict(limits)
+        elif not rc.emit_cpu_limits:
+            # Explicit empty `limits` tells the webhook to REMOVE the pod's
+            # limits sub-tree; an absent key would leave a template CPU limit.
+            entry["limits"] = {}
         payload.append(entry)
 
     # Build the per-container annotation map. Only emit annotations for
@@ -1423,6 +1632,96 @@ def _normalize_rfc3339(value) -> str | None:
         return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     s = str(value).strip()
     return s or None
+
+
+def _res_brief(res: dict) -> str:
+    """Compact `req=cpu/mem lim=cpu/mem` rendering for log lines."""
+    r = res.get("requests") or {}
+    lim = res.get("limits") or {}
+    return (f"req={r.get('cpu', '—')}/{r.get('memory', '—')} "
+            f"lim={lim.get('cpu', '—')}/{lim.get('memory', '—')}")
+
+
+_MIB = 1 << 20
+
+# (section, key) → hard maximum attribute on ResourceBounds (0 = unset).
+_MAX_BOUND_ATTR = {
+    ("requests", "cpu"): "max_cpu_request_m",
+    ("requests", "memory"): "max_memory_request_mi",
+    ("limits", "cpu"): "max_cpu_limit_m",
+    ("limits", "memory"): "max_memory_limit_mi",
+}
+
+
+def _apply_max_change(
+    res: dict,
+    baseline: dict,
+    percent: float,
+    *,
+    exempt_memory_up: bool,
+    bounds: ResourceBounds,
+) -> dict:
+    """Clamp every request/limit to within ±`percent` of its baseline value.
+
+    Fields without a baseline value (or a zero baseline) are left alone. With
+    `exempt_memory_up`, memory may grow past the cap (OOM-driven growth) but
+    a memory decrease is still capped. The configured max bounds are hard
+    invariants and win over the cap's lower edge; `limits >= requests` is
+    restored afterwards.
+    """
+    if percent <= 0 or not baseline:
+        return res
+    frac = percent / 100.0
+    out: dict = {}
+    for section in ("requests", "limits"):
+        new_s = dict(res.get(section) or {})
+        old_s = baseline.get(section) or {}
+        for key in ("cpu", "memory"):
+            new_v, old_v = new_s.get(key), old_s.get(key)
+            if not new_v or not old_v:
+                continue
+            is_cpu = key == "cpu"
+            unit = 1 if is_cpu else _MIB
+            new_n = (_parse_cpu_m(new_v) if is_cpu else _parse_memory_bytes(new_v)) / unit
+            old_n = (_parse_cpu_m(old_v) if is_cpu else _parse_memory_bytes(old_v)) / unit
+            if old_n <= 0:
+                continue
+            upper = int(old_n * (1 + frac))          # floor: stay inside the cap
+            lower = -int(-(old_n * (1 - frac)) // 1)  # ceil
+            capped = new_n
+            if new_n > upper and not (exempt_memory_up and not is_cpu):
+                capped = upper
+            elif new_n < lower:
+                capped = max(lower, 0)
+            if capped == new_n:
+                continue
+            max_v = getattr(bounds, _MAX_BOUND_ATTR[(section, key)], 0)
+            if max_v:
+                capped = min(capped, max_v)
+            capped = int(capped)
+            new_s[key] = f"{capped}m" if is_cpu else _fmt_memory(str(capped * _MIB))
+        if new_s:
+            out[section] = new_s
+    for key, parse in (("cpu", _parse_cpu_m), ("memory", _parse_memory_bytes)):
+        req = (out.get("requests") or {}).get(key)
+        lim = (out.get("limits") or {}).get(key)
+        if req and lim and parse(lim) < parse(req):
+            out["limits"][key] = req
+    return out
+
+
+def _drop_cpu_limit(res: dict) -> dict:
+    """Return `res` without `limits.cpu` (and without an emptied `limits`)."""
+    limits = dict(res.get("limits") or {})
+    if "cpu" not in limits:
+        return res
+    limits.pop("cpu")
+    out = dict(res)
+    if limits:
+        out["limits"] = limits
+    else:
+        out.pop("limits", None)
+    return out
 
 
 def _apply_oom_floor(res: dict, floor_bytes: int, multiplier: float) -> dict:
@@ -1682,6 +1981,10 @@ def _render_cr_doc(e: WebhookEntry, prev_doc: dict | None = None) -> dict:
     if prev_doc:
         prev_meta = prev_doc.get("metadata") or {}
         for k, v in (prev_meta.get("annotations") or {}).items():
+            if k == ARGOCD_TRACKING_ID_ANNOTATION:
+                # Written by ArgoCD on the live object, never meaningful in
+                # git; carrying it would make another Application claim the CR.
+                continue
             if _is_oom_annotation(k):
                 # Owned by the OOM logic — handled below via
                 # e.oom_annotations. Skip here to drop legacy CSV keys
@@ -1694,6 +1997,14 @@ def _render_cr_doc(e: WebhookEntry, prev_doc: dict | None = None) -> dict:
     # prev state already, so this is the canonical post-merge view.
     if e.oom_annotations:
         annotations.update(e.oom_annotations)
+
+    # Change audit: refreshed only when the container resources differ from
+    # the previously committed doc, so a no-op sync renders identical bytes.
+    _stamp_change_audit(
+        annotations, e.containers,
+        ((prev_doc or {}).get("spec") or {}).get("containers"),
+        existed=prev_doc is not None,
+    )
 
     # Tool-owned label always present.
     labels["app.kubernetes.io/managed-by"] = "kube-resource-updater"
@@ -1788,9 +2099,366 @@ def _ordered_container(c: dict) -> dict:
     out = {"name": c["name"]}
     if c.get("requests"):
         out["requests"] = c["requests"]
-    if c.get("limits"):
+    if c.get("limits") or c.get("limits") == {}:
+        # An explicit empty map is meaningful (emitCpuLimits=false with no
+        # other limit): the webhook removes the pod's limits.
         out["limits"] = c["limits"]
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Direct write-back (server-side apply)                                       #
+# --------------------------------------------------------------------------- #
+
+def _argocd_tracking_metadata(live: dict) -> tuple[list[str], list[str]]:
+    """Return `(annotation_keys, label_keys)` of ArgoCD tracking metadata on a
+    live CR that direct write-back must remove.
+
+    Rule (tracking metadata only — operator-set Argo CD options such as
+    `sync-options` / `compare-options` are left alone):
+      - the `argocd.argoproj.io/tracking-id` annotation (annotation tracking);
+      - the `app.kubernetes.io/instance` label ONLY when a field manager
+        whose name starts with `argocd` owns it (ArgoCD label tracking).
+        The same label set by Helm, kustomize or a person is left alone —
+        the tool cannot tell those apart from intent, managedFields can.
+
+    Left in place, a tracking annotation/label makes ArgoCD treat the CR as
+    belonging to the Application that used to render it, and auto-prune
+    deletes it on the next sync.
+    """
+    anns = [k for k in sorted(live.get("annotations") or {})
+            if k == ARGOCD_TRACKING_ID_ANNOTATION]
+    labels: list[str] = []
+    if ARGOCD_INSTANCE_LABEL in (live.get("labels") or {}):
+        for mf in live.get("managed_fields") or []:
+            if not str(mf.get("manager", "")).lower().startswith("argocd"):
+                continue
+            owned = (((mf.get("fieldsV1") or {}).get("f:metadata") or {})
+                     .get("f:labels") or {})
+            if f"f:{ARGOCD_INSTANCE_LABEL}" in owned:
+                labels.append(ARGOCD_INSTANCE_LABEL)
+                break
+    return anns, labels
+
+
+def _foreign_spec_managers(managed_fields) -> list[str]:
+    """Field managers other than the tool that own anything under `spec`."""
+    out = []
+    for mf in managed_fields or []:
+        manager = str(mf.get("manager", ""))
+        if manager == FIELD_MANAGER:
+            continue
+        if "f:spec" in (mf.get("fieldsV1") or {}):
+            out.append(manager)
+    return sorted(set(out))
+
+
+def _direct_apply_body(e: WebhookEntry, live: dict | None) -> dict:
+    """Apply configuration for one CR: ONLY the fields the tool owns.
+
+    Operator annotations/labels on the live object are deliberately not
+    copied — under server-side apply they stay with their own manager, so
+    nothing foreign is claimed (and with `force` nothing foreign is
+    overwritten either).
+    """
+    live_anns = (live or {}).get("annotations") or {}
+    annotations: dict[str, str] = {
+        k: live_anns[k]
+        for k in (LAST_CHANGED_ANNOTATION, PREVIOUS_RESOURCES_ANNOTATION)
+        if k in live_anns
+    }
+    annotations.update(e.oom_annotations or {})
+    _stamp_change_audit(
+        annotations, e.containers,
+        [{"name": n, **v} for n, v in ((live or {}).get("containers") or {}).items()],
+        existed=live is not None,
+    )
+    return {
+        "apiVersion": CR_API_VERSION,
+        "kind": CR_KIND,
+        "metadata": {
+            "name": e.cr_name,
+            "namespace": e.namespace,
+            "labels": {MANAGED_BY_LABEL: MANAGED_BY_VALUE},
+            "annotations": annotations,
+        },
+        "spec": {
+            "selector": {"matchLabels": {k: str(v) for k, v in e.selector_labels.items()}},
+            "containers": [_ordered_container(c) for c in e.containers],
+        },
+    }
+
+
+def _direct_unchanged(body: dict, live: dict | None) -> bool:
+    """True when applying `body` would not change the live CR."""
+    if live is None:
+        return False
+    live_containers = live.get("containers") or {}
+    if _containers_index(body["spec"]["containers"]) != _containers_index(
+            [{"name": n, **v} for n, v in live_containers.items()]):
+        return False
+    # An explicit empty `limits` differs from an absent one at admission.
+    if {c["name"] for c in body["spec"]["containers"] if "limits" in c} != {
+            n for n, v in live_containers.items() if "limits" in v}:
+        return False
+    if body["spec"]["selector"]["matchLabels"] != (live.get("selector") or {}):
+        return False
+    live_anns = live.get("annotations") or {}
+    want = body["metadata"]["annotations"]
+    if any(live_anns.get(k) != v for k, v in want.items()):
+        return False
+    # A tool-owned OOM annotation the new state drops (e.g. oomFloorReset)
+    # still needs an apply so server-side apply removes it.
+    if any((_is_oom_annotation(k) or k.startswith(OOM_INVESTIGATION_PREFIX)) and k not in want
+           for k in live_anns):
+        return False
+    if (live.get("labels") or {}).get(MANAGED_BY_LABEL) != MANAGED_BY_VALUE:
+        return False
+    anns, labels = _argocd_tracking_metadata(live)
+    return not anns and not labels
+
+
+def _ssa_apply(custom_objects_api, namespace: str, name: str, body: dict) -> dict:
+    """Server-side apply one ResourceOverride.
+
+    The generated client hard-codes `merge-patch+json` for custom objects,
+    so the apply goes through `call_api` with the apply content type. `force`
+    only re-acquires fields present in `body`, which holds tool-owned fields
+    exclusively.
+    """
+    return custom_objects_api.api_client.call_api(
+        "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}", "PATCH",
+        {"group": CR_GROUP, "version": CR_VERSION, "namespace": namespace,
+         "plural": CR_PLURAL, "name": name},
+        [("fieldManager", FIELD_MANAGER), ("force", "true")],
+        {"Accept": "application/json", "Content-Type": "application/apply-patch+yaml"},
+        body=body,
+        response_type="object",
+        auth_settings=["BearerToken"],
+        _return_http_data_only=True,
+    )
+
+
+def _resource_change_summary(old: dict[str, dict], new: dict[str, dict]) -> str:
+    """`app: requests.cpu 100m→200m, limits.memory 256Mi→512Mi; side: added`."""
+    parts: list[str] = []
+    for name in sorted(set(old) | set(new)):
+        if name not in old:
+            parts.append(f"{name}: added")
+            continue
+        if name not in new:
+            parts.append(f"{name}: removed")
+            continue
+        diffs = []
+        for section in ("requests", "limits"):
+            o, n = old[name].get(section) or {}, new[name].get(section) or {}
+            for key in ("cpu", "memory"):
+                if o.get(key) != n.get(key):
+                    diffs.append(f"{section}.{key} {o.get(key, '—')}→{n.get(key, '—')}")
+        if diffs:
+            parts.append(f"{name}: " + ", ".join(diffs))
+    return "; ".join(parts) or "no resource change"
+
+
+def _emit_change_event(core_v1_api, namespace: str, name: str, uid: str,
+                       resource_version: str, message: str) -> None:
+    """Record a `ResourcesUpdated` Event on the CR. Best effort — a failed
+    Event never fails the sync (the CR annotations hold the same facts)."""
+    if core_v1_api is None:
+        return
+    ts = _rfc3339(_utcnow())
+    body = {
+        "metadata": {"generateName": f"{name}.", "namespace": namespace},
+        "involvedObject": {
+            "apiVersion": CR_API_VERSION, "kind": CR_KIND, "name": name,
+            "namespace": namespace, "uid": uid, "resourceVersion": resource_version,
+        },
+        "reason": "ResourcesUpdated",
+        "message": message[:1024],
+        "type": "Normal",
+        "source": {"component": FIELD_MANAGER},
+        "reportingComponent": FIELD_MANAGER,
+        "reportingInstance": "sync",
+        "firstTimestamp": ts,
+        "lastTimestamp": ts,
+        "count": 1,
+    }
+    try:
+        core_v1_api.create_namespaced_event(namespace, body=body)
+    except Exception as exc:  # noqa: BLE001 — audit Event is best effort
+        _log.warning("[direct] could not record Event for %s/%s: %s", namespace, name, exc)
+
+
+def _apply_direct(
+    entries: list[WebhookEntry],
+    *,
+    state_lookup: dict[tuple[str, str], dict],
+    global_dry_run: bool,
+    custom_objects_api,
+    core_v1_api,
+    prune_scope: PruneScope | None = None,
+    adopt_foreign: bool = False,
+) -> list[tuple[str, list[str]]] | None:
+    """Server-side apply every entry and delete tool-owned CRs no longer wanted.
+
+    A CR whose `spec` another field manager owns (still under an Argo CD
+    Application, hand-applied) is skipped for apply and deletion with an
+    error unless `adopt_foreign` — a forced apply would silently take it over.
+
+    Orphan scope mirrors gitops pruning: a CR labelled
+    `app.kubernetes.io/managed-by=kube-resource-updater` that no entry of this
+    sync renders is deleted — a namespace that stopped opting in, a workload
+    that went away. Nothing is pruned when the sync produced no entries at all
+    (gitops never commits in that case either), when the listing fails, or
+    for a per-workload dryRun entry. CRs without the label are never listed.
+    """
+    from kubernetes.client.rest import ApiException
+
+    applied: list[WebhookEntry] = []
+    unchanged = 0
+    failed = 0
+    unreadable = (prune_scope.unreadable_namespaces if prune_scope else set())
+    for ns in sorted({e.namespace for e in entries} & unreadable):
+        _log.warning("[direct] live ResourceOverrides in %s could not be read — skipping "
+                     "apply and orphan deletion there this sync (no baseline to compare "
+                     "against)", ns)
+    for e in entries:
+        if e.namespace in unreadable:
+            continue
+        live = state_lookup.get((e.namespace, e.cr_name))
+        foreign = _foreign_spec_managers((live or {}).get("managed_fields"))
+        if foreign and not adopt_foreign:
+            failed += 1
+            _log.error(
+                "[direct] ResourceOverride %s/%s: spec is owned by %s, not by %s — skipped. "
+                "Remove it from the Application / tool that manages it, or set "
+                "config.direct.adoptForeignCRs=true for one migration sync to take it over.",
+                e.namespace, e.cr_name, ", ".join(foreign), FIELD_MANAGER)
+            continue
+        body = _direct_apply_body(e, live)
+        if _direct_unchanged(body, live):
+            unchanged += 1
+            continue
+        old_idx = _containers_index(
+            [{"name": n, **v} for n, v in ((live or {}).get("containers") or {}).items()])
+        new_idx = _containers_index(body["spec"]["containers"])
+        summary = _resource_change_summary(old_idx, new_idx) if live else "created"
+        if e.dry_run or global_dry_run:
+            _log.info("[DRY RUN] would apply ResourceOverride %s/%s (%s)",
+                      e.namespace, e.cr_name, summary)
+            continue
+        try:
+            result = _ssa_apply(custom_objects_api, e.namespace, e.cr_name, body) or {}
+            # A field another manager co-owns survives an apply that omits it
+            # (e.g. `limits.cpu` written by ArgoCD before the switch to direct
+            # mode). Replace the list wholesale when the result disagrees.
+            got = _containers_index(((result.get("spec") or {}).get("containers")) or [])
+            if got and got != new_idx:
+                custom_objects_api.patch_namespaced_custom_object(
+                    CR_GROUP, CR_VERSION, e.namespace, CR_PLURAL, e.cr_name,
+                    body={"spec": {"containers": body["spec"]["containers"]}},
+                    field_manager=FIELD_MANAGER,
+                )
+            strip_anns, strip_labels = _argocd_tracking_metadata(live or {})
+            if strip_anns or strip_labels:
+                meta: dict = {}
+                if strip_anns:
+                    meta["annotations"] = {k: None for k in strip_anns}
+                if strip_labels:
+                    meta["labels"] = {k: None for k in strip_labels}
+                custom_objects_api.patch_namespaced_custom_object(
+                    CR_GROUP, CR_VERSION, e.namespace, CR_PLURAL, e.cr_name,
+                    body={"metadata": meta}, field_manager=FIELD_MANAGER,
+                )
+                _log.info("[direct] %s/%s: removed ArgoCD tracking metadata %s",
+                          e.namespace, e.cr_name, ", ".join(strip_anns + strip_labels))
+        except ApiException as exc:
+            failed += 1
+            _log.error("[direct] apply of ResourceOverride %s/%s failed: %s",
+                       e.namespace, e.cr_name, exc)
+            continue
+        meta = result.get("metadata") or {}
+        _emit_change_event(core_v1_api, e.namespace, e.cr_name,
+                           meta.get("uid") or (live or {}).get("uid", ""),
+                           meta.get("resourceVersion", ""), summary)
+        _log.info("[direct] applied ResourceOverride %s/%s (%s)",
+                  e.namespace, e.cr_name, summary)
+        applied.append(e)
+
+    deleted = _prune_orphan_crs(entries, global_dry_run=global_dry_run,
+                                custom_objects_api=custom_objects_api,
+                                prune_scope=prune_scope, adopt_foreign=adopt_foreign)
+    _log.info("[direct] %d applied, %d unchanged, %d failed, %d orphan(s) deleted",
+              len(applied), unchanged, failed, len(deleted))
+    if not applied and not deleted:
+        return None
+    namespaces = sorted({e.namespace for e in applied} | {ns for ns, _ in deleted})
+    return [(f"apiserver ({len(applied)} applied, {len(deleted)} deleted)", namespaces)]
+
+
+def _prune_orphan_crs(
+    entries: list[WebhookEntry],
+    *,
+    global_dry_run: bool,
+    custom_objects_api,
+    prune_scope: PruneScope | None = None,
+    adopt_foreign: bool = False,
+) -> list[tuple[str, str]]:
+    """Delete tool-labelled CRs whose workload is gone.
+
+    Kept: every entry of this sync plus every workload in `prune_scope.keep`
+    (discovered, even without an entry). Nothing is deleted in a blocked
+    namespace. Without a scope only the entries are kept (unit callers).
+    """
+    from kubernetes.client.rest import ApiException
+
+    if not entries:
+        return []
+    keep = {(e.namespace, e.cr_name) for e in entries}
+    blocked: set[str] = set()
+    if prune_scope is not None:
+        keep |= prune_scope.keep
+        blocked = prune_scope.blocked_namespaces | prune_scope.unreadable_namespaces
+    try:
+        listing = custom_objects_api.list_cluster_custom_object(
+            CR_GROUP, CR_VERSION, CR_PLURAL,
+            label_selector=f"{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}",
+        )
+    except ApiException as exc:
+        _log.warning("[direct] could not list tool-owned ResourceOverrides (%s) — "
+                     "orphan cleanup skipped this sync", exc)
+        return []
+    deleted: list[tuple[str, str]] = []
+    for item in (listing or {}).get("items") or []:
+        meta = item.get("metadata") or {}
+        ns, name = meta.get("namespace"), meta.get("name")
+        if not ns or not name or (ns, name) in keep:
+            continue
+        if ns in blocked:
+            _log.info("[direct] keeping %s/%s: namespace had a discovery / query failure "
+                      "this sync", ns, name)
+            continue
+        if (meta.get("labels") or {}).get(MANAGED_BY_LABEL) != MANAGED_BY_VALUE:
+            continue  # defence in depth against a selector-ignoring API
+        foreign = _foreign_spec_managers(meta.get("managedFields"))
+        if foreign and not adopt_foreign:
+            _log.error("[direct] not deleting orphan ResourceOverride %s/%s: its spec is "
+                       "owned by %s", ns, name, ", ".join(foreign))
+            continue
+        if global_dry_run:
+            _log.info("[DRY RUN] would delete orphan ResourceOverride %s/%s", ns, name)
+            continue
+        try:
+            custom_objects_api.delete_namespaced_custom_object(
+                CR_GROUP, CR_VERSION, ns, CR_PLURAL, name)
+        except ApiException as exc:
+            if getattr(exc, "status", None) != 404:
+                _log.error("[direct] delete of orphan ResourceOverride %s/%s failed: %s",
+                           ns, name, exc)
+            continue
+        _log.info("[direct] deleted orphan ResourceOverride %s/%s", ns, name)
+        deleted.append((ns, name))
+    return deleted
 
 
 # --------------------------------------------------------------------------- #
@@ -1808,8 +2476,16 @@ def _commit_repo(
     mr_config: MrConfig | None = None,
     auto_rollout_by_namespace: "dict[str, bool] | None" = None,
     held_report: "list[HeldContainer] | None" = None,
+    preserve_entries: "list[WebhookEntry] | None" = None,
+    untouched_namespaces: "set[str] | None" = None,
 ) -> list[tuple[str, list[str]]]:
     """Clone the repo, bucket-split entries by per-workload `create_mr`, push.
+
+    Files of `untouched_namespaces` are neither written nor pruned.
+
+    `preserve_entries` (per-workload dryRun) are never written, but their
+    committed docs are carried forward verbatim and their files are not
+    pruned — rebuilding a namespace file without them would delete their CRs.
 
     Returns a list of (result_url, [namespace, ...]) — at most two entries:
     one for the direct push (when any entry has `create_mr=False`) and one
@@ -1869,7 +2545,8 @@ def _commit_repo(
         # ONE read of the prior state, used by both passes. The same snapshot
         # also feeds the MR description and log deltas — those report against
         # the state before THIS sync started, regardless of bucket order.
-        old_docs = _read_old_docs(repo_dir, entries, path)
+        keep = list(preserve_entries or [])
+        old_docs = _read_old_docs(repo_dir, entries + keep, path)
 
         _run(["git", "-C", repo_dir, "config", "user.name",  git_author_name])
         _run(["git", "-C", repo_dir, "config", "user.email", git_author_email])
@@ -1886,9 +2563,10 @@ def _commit_repo(
                 entries=direct_entries,
                 path=path,
                 old_docs=old_docs,
-                preserve_entries=mr_entries,
+                preserve_entries=mr_entries + keep,
             )
-            deleted = _prune_orphan_files(repo_dir, entries, path) if not mr_entries else []
+            deleted = _prune_orphan_files(repo_dir, entries + keep, path,
+                                          untouched_namespaces=untouched_namespaces) if not mr_entries else []
             _log_entry_deltas(direct_entries, old_docs, path)
 
             if changed or deleted:
@@ -1900,7 +2578,7 @@ def _commit_repo(
                 if _run(["git", "-C", repo_dir, "diff", "--cached", "--quiet"], allow_nonzero=True).returncode:
                     commit_msg = _commit_message(direct_entries, deleted)
                     _run(["git", "-C", repo_dir, "commit", "-m", commit_msg])
-                    _run(["git", "-C", repo_dir, "push", "origin", branch])
+                    _push_with_rebase(repo_dir, branch)
                     direct_pushed = True
                     ns_list = sorted({e.namespace for e in direct_entries})
                     # Blank between the per-namespace trees and this
@@ -1937,7 +2615,7 @@ def _commit_repo(
                 # Refresh our working copy so the MR branch forks from the
                 # updated tip of `branch`, not the pre-push HEAD.
                 _run(["git", "-C", repo_dir, "fetch", "origin", branch])
-            work_branch = "resource-updater/sync"
+            work_branch = (mr_config.work_branch if mr_config else "") or "resource-updater/sync"
             _run(["git", "-C", repo_dir, "checkout", "-B", work_branch, f"origin/{branch}"])
 
             changed = _write_namespace_files(
@@ -1945,8 +2623,10 @@ def _commit_repo(
                 entries=entries,
                 path=path,
                 old_docs=old_docs,
+                preserve_entries=keep,
             )
-            deleted = _prune_orphan_files(repo_dir, entries, path)
+            deleted = _prune_orphan_files(repo_dir, entries + keep, path,
+                                          untouched_namespaces=untouched_namespaces)
             _log_entry_deltas(mr_entries, old_docs, path)
 
             if changed or deleted:
@@ -1958,9 +2638,11 @@ def _commit_repo(
                 if _run(["git", "-C", repo_dir, "diff", "--cached", "--quiet"], allow_nonzero=True).returncode:
                     commit_msg = _commit_message(mr_entries, deleted)
                     _run(["git", "-C", repo_dir, "commit", "-m", commit_msg])
-                    _run(["git", "-c", "push.useForceWithLease=false",
-                          "-C", repo_dir, "push", "--force",
-                          "--set-upstream", "origin", work_branch])
+                    # Force-push of the tool's own work branch: a rejection
+                    # here is never a race (no rebase), only a permission or
+                    # protection problem — surfaced the same clean way.
+                    _push_with_rebase(repo_dir, work_branch, allow_rebase=False,
+                                      extra_args=["--force", "--set-upstream"])
 
                     assignee_ids = provider.resolve_users(mr_config.assignees if mr_config else [])
                     reviewer_ids = provider.resolve_users(mr_config.reviewers if mr_config else [])
@@ -2159,7 +2841,8 @@ def _write_namespace_files(
     return changed
 
 
-def _prune_orphan_files(repo_dir: str, entries: list[WebhookEntry], path: str) -> list[str]:
+def _prune_orphan_files(repo_dir: str, entries: list[WebhookEntry], path: str,
+                        untouched_namespaces: "set[str] | None" = None) -> list[str]:
     """Delete any tool-managed CR file the current run did not write to.
 
     Two scenarios this covers:
@@ -2184,6 +2867,8 @@ def _prune_orphan_files(repo_dir: str, entries: list[WebhookEntry], path: str) -
         return []
 
     expected_files: set[str] = {_cr_relpath(e, path) for e in entries}
+    untouched = set(untouched_namespaces or ())
+    expected_files |= {f"{path}/{ns}{CR_FILE_SUFFIX}" for ns in untouched}
     yaml = YAML()
     pruned: list[str] = []
 
@@ -2208,6 +2893,8 @@ def _prune_orphan_files(repo_dir: str, entries: list[WebhookEntry], path: str) -
     for entry in sorted(os.listdir(base)):
         full = os.path.join(base, entry)
         if os.path.isdir(full):
+            if entry in untouched:
+                continue  # legacy per-namespace folder of an untouched namespace
             for fname in sorted(os.listdir(full)):
                 if not fname.endswith(".yaml"):
                     continue
@@ -2411,6 +3098,60 @@ def _count_container_rows(body: str) -> int:
         if line.startswith("| `") and line.count("|") >= 7:
             n += 1
     return n
+
+
+# --------------------------------------------------------------------------- #
+# Push with bounded rebase                                                     #
+# --------------------------------------------------------------------------- #
+
+class GitPushError(RuntimeError):
+    """A push the remote rejected for good. The message is operator-facing
+    and already redacted — callers log it and exit non-zero, no traceback."""
+
+
+# git's wording for "the remote moved on": `(fetch first)` / `non-fast-forward`.
+_NON_FAST_FORWARD_RE = re.compile(r"fetch first|non-fast-forward|tip of your current branch is behind")
+
+
+def _push_with_rebase(repo_dir: str, branch: str, *, extra_args: list[str] | None = None,
+                      allow_rebase: bool = True) -> None:
+    """`git push origin <branch>`; on a non-fast-forward, rebase once and retry.
+
+    Another writer (a second cluster sharing the repo, a human) can land a
+    commit on the target branch between our clone and our push. One
+    fetch + rebase + push resolves that; a second rejection, a rebase
+    conflict or any other rejection (protected branch, missing permission)
+    raises `GitPushError` with a redacted, actionable message.
+    """
+    cmd = ["git", "-C", repo_dir, "push", *(extra_args or []), "origin", branch]
+    res = _run(cmd, allow_nonzero=True)
+    if res.returncode == 0:
+        return
+    stderr = res.stderr or ""
+    if allow_rebase and _NON_FAST_FORWARD_RE.search(stderr):
+        _log.warning("[push] %s moved on since the clone — rebasing onto origin/%s "
+                     "and retrying once", branch, branch)
+        fetch = _run(["git", "-C", repo_dir, "fetch", "origin", branch], allow_nonzero=True)
+        rebase = _run(["git", "-C", repo_dir, "rebase", f"origin/{branch}"], allow_nonzero=True) \
+            if fetch.returncode == 0 else fetch
+        if rebase.returncode != 0:
+            _run(["git", "-C", repo_dir, "rebase", "--abort"], allow_nonzero=True)
+            raise GitPushError(
+                f"push to {branch!r} was rejected (remote has new commits) and rebasing onto "
+                f"origin/{branch} failed — someone else changed the same CR files. The next "
+                f"sync re-renders from the new tip. git said: "
+                f"{_redact_auth((rebase.stderr or '').strip())[:500]}"
+            )
+        res = _run(cmd, allow_nonzero=True)
+        if res.returncode == 0:
+            return
+        stderr = res.stderr or ""
+    raise GitPushError(
+        f"push to branch {branch!r} was rejected by the remote. If the branch is protected "
+        f"or the token lacks write permission, grant the git credentials push permission "
+        f"on {branch!r}, or set config.createMr=true so changes go through a merge/pull "
+        f"request. git said: {_redact_auth(stderr.strip())[:500]}"
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -14,7 +14,7 @@ A sync **CronJob** queries Prometheus for actual CPU + memory usage of every opt
 
 The sync also detects `OOMKilled` events on opted-in workloads and bumps memory limits ahead of the next OOM cycle — see the [OOM-aware](#oom-aware) section.
 
-Write-back targets **GitLab** (merge requests — battle-tested in production) or **GitHub** (pull requests — validated against a live repo: branch push, PR open, and idempotent re-open/adoption). The provider is auto-detected from the repo URL, or forced via `config.gitProvider`.
+Write-back targets **GitLab** (merge requests — battle-tested in production) or **GitHub** (pull requests — token auth validated against a live repo: branch push, PR open, and idempotent re-open/adoption; GitHub App auth is still alpha). The provider is auto-detected from the repo URL, or forced via `config.gitProvider`. Clusters without a GitOps engine can skip git entirely with [`writebackMode: direct`](#write-back-modes).
 
 ## Why this exists
 
@@ -30,6 +30,26 @@ VPA's auto-applying recommendations are reviewable only after the fact (pod was 
 | **In-process cert reconciler** | Generates and rotates a self-signed CA + serving cert; patches the `MutatingWebhookConfiguration` / `ValidatingWebhookConfiguration` `caBundle`. No cert-manager dependency. |
 | **Auto-rollout watcher** | When a CR's resources change and `autoRollout` is enabled, stamps `kubectl.kubernetes.io/restartedAt` on the workload's PodTemplate, triggering a rolling restart. |
 | **`ResourceOverride` CRD** | `kube-resource-updater.io/v1`. Holds `selector.matchLabels` + per-container `requests` / `limits` + audit annotations (`oom-floor.<c>`, `oom-last-event.<c>`, `oom-boost-history.<c>`, `managed-by`). |
+
+## Write-back modes
+
+`config.writebackMode` selects where the rendered `ResourceOverride`s go.
+
+| | `gitops` (default) | `direct` |
+|---|---|---|
+| Write path | Commit to `crWriteback.repoUrl` (direct push or MR/PR); a GitOps engine applies the CRs | Server-side apply to the cluster API, field manager `kube-resource-updater` |
+| Review before it lands | Yes (`createMr: true`) | No — changes take effect on the next sync |
+| Audit trail | Git history + MR description | `kube-resource-updater.io/last-changed` + `previous-resources` annotations on the CR, and a `ResourcesUpdated` Kubernetes Event per change |
+| Cleanup of CRs no longer wanted | File pruned in git, the GitOps engine deletes the CR | Tool deletes CRs labelled `app.kubernetes.io/managed-by: kube-resource-updater` that the sync no longer renders — never anything else |
+| Needs | Repo + git credentials | Nothing extra; the chart grants the sync create/patch/delete on `resourceoverrides` and create/patch on `events` only in this mode |
+
+> **Blast radius of `direct`:** the sync ServiceAccount can create, patch and delete `ResourceOverride`s in **every** namespace (opt-in is a namespace annotation that can appear at any time, so the grant cannot be scoped to a fixed list). The code limits what it does with that: it only deletes objects whose own listed metadata carries `app.kubernetes.io/managed-by: kube-resource-updater` (re-checked on the object being deleted, not on a cached name), never in a namespace where discovery, a Prometheus query or the live-CR read failed that sync, and never a CR whose `spec` another field manager owns. Treat the ServiceAccount as able to change pod resources cluster-wide.
+
+Trade-off: `direct` removes the git round-trip (no repo, no token, no merge latency) at the cost of pre-merge review; the CR annotations and Events keep "what changed, when, from what" queryable with `kubectl describe ro`. `dryRun` is honoured in both modes (`direct` logs the would-be applies and deletes).
+
+> **ArgoCD and `direct`:** the CR path must **not** be managed by an Argo CD Application (or exclude the `ResourceOverride` kind with `resource.exclusions`), otherwise Argo CD and the tool fight over the same objects and auto-prune deletes the CRs. A CR whose `spec` is owned by any other field manager is **skipped** (no apply, no delete) with an error, so the tool never silently takes a CR away from Argo CD or a person. When switching an existing install from `gitops` to `direct`, remove the CRs from the Application first, then run one sync with `config.direct.adoptForeignCRs: true` to take ownership; the tool also strips the leftover tracking metadata — the `argocd.argoproj.io/tracking-id` annotation, and `app.kubernetes.io/instance` only when an `argocd*` field manager owns it — so Argo CD no longer claims them. Operator-set Argo CD options (`sync-options`, `compare-options`) are left alone.
+
+Guardrails that apply in both modes: `maxChangePercent` (per-sync change cap, OOM growth exempt), `cooldownHours` (minimum time between non-OOM changes of one workload), `emitCpuLimits: false` (requests-only CPU), and `cronjob.suspend` as a kill switch. See [docs/reference.md](docs/reference.md#guardrails).
 
 ## Quick start
 
@@ -114,7 +134,7 @@ EOF
 # Dry-run sync against the live cluster (no git writes); uses your kubeconfig
 CONFIG_FILE=./config.yaml DRY_RUN=true python3 main.py sync
 
-# QA: ~1,250 unit assertions across all features
+# QA: ~1,500 unit assertions across all features
 python3 tools/qa_params.py
 ```
 

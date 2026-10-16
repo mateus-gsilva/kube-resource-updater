@@ -71,6 +71,9 @@ class ContainerOverride:
     name: str
     requests: dict[str, str]   # {"cpu": "100m", "memory": "256Mi"}
     limits: dict[str, str]
+    # True when the CR spells `limits` out, even as `{}` — the webhook then
+    # owns the pod's limits sub-tree (an empty map removes it).
+    limits_set: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,6 +126,7 @@ class ResourceOverrideCache:
         self,
         api: client.CustomObjectsApi,
         event_callback: Callable[[str, ResourceOverride, ResourceOverride | None], None] | None = None,
+        seed_callback: Callable[[list[ResourceOverride]], None] | None = None,
     ):
         self._api = api
         self._index: dict[str, _NamespaceIndex] = {}
@@ -135,6 +139,9 @@ class ResourceOverrideCache:
         # event. Receives (event_type, new_ro, prev_ro). Used by the
         # rollout trigger; left None when the controller surface is off.
         self._event_callback = event_callback
+        # Receives the full CR list after every (re)list, after any synthetic
+        # events — consumers record it as last-known state (no side effects).
+        self._seed_callback = seed_callback
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
@@ -296,6 +303,11 @@ class ResourceOverrideCache:
         else:
             _log.info("resource-override cache populated: %d CRs across %d namespaces",
                       cr_count, len(new_index))
+        if self._seed_callback is not None:
+            try:
+                self._seed_callback(list(new_flat.values()))
+            except Exception:
+                _log.exception("[cr-cache] seed callback raised")
 
     def _watch_loop(self) -> None:
         w = watch.Watch()
@@ -417,6 +429,7 @@ def _parse_container(c: dict) -> ContainerOverride:
         name=c["name"],
         requests=_string_resources(c.get("requests") or {}),
         limits=_string_resources(c.get("limits") or {}),
+        limits_set="limits" in c and c.get("limits") is not None,
     )
 
 

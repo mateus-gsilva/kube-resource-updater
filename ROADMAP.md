@@ -10,17 +10,14 @@ reference: [docs/reference.md](docs/reference.md).
 
 ## Confirmed bugs
 
-| | Item |
-|---|---|
-| 🟡 | **Crash-loop gate is inert without kube-state-metrics.** The gate added for the 2026-07-20 undersizing incident reads `kube_pod_container_status_restarts_total`. On a cluster without kube-state-metrics the query returns no data, the gate fails open, and a workload can still be sized from a crash-looping pod's samples — the tool warns once per sync but cannot stop it. The coverage gate still applies (it uses cAdvisor series the tool already requires) and catches the short-history subset of the same failure, so this is a partial gap, not a full regression. Closing it means a second, kubelet-only restart signal. |
-| 🟡 | **Grow/shrink has no baseline when both OOM detection and the health gate are disabled.** `_apply_grow_shrink` compares against the live CR's container resources, which only reach the build phase via `fetch_oom_state`. `cmd_sync` calls that when either `oomDetectionEnabled` or `healthGateEnabled` resolves true — so with both off, `growOnly` / `shrinkOnly` silently no-op instead of clamping. The CR-state fetch should not be conditional on either feature. |
+None open.
 
 ## Known gaps (0.x series)
 
 | | Item |
 |---|---|
 | 🟢 | **GitHub assignees.** The `GitHubProvider` accepts `mr.assignees` but does not yet apply them (needs a PATCH to the Issues API); reviewer requests work. GitLab applies assignees, reviewers, and labels. TODO in `src/git_provider.py`. |
-| 🔴 | **Integration test suite.** The offline QA suite (~1,250 asserts) is comprehensive at the unit/render layer, but cluster-based integration tests (real apiserver + webhook + kubelet sequencing, failure injection, scale, upgrade path) are not yet automated. |
+| 🔴 | **Integration test suite.** The offline QA suite (~1,500 asserts) is comprehensive at the unit/render layer, but cluster-based integration tests (real apiserver + webhook + kubelet sequencing, failure injection, scale, upgrade path) are not yet automated. |
 
 ## Planned features
 
@@ -43,7 +40,7 @@ reference: [docs/reference.md](docs/reference.md).
 
 | | Item |
 |---|---|
-| 🟡 | **push-only / direct modes** — `config.writebackMode: gitops \| push-only \| direct`. push-only commits + pushes the branch and stops (user opens the PR); direct applies CRs straight to the cluster API, trading the git audit trail for latency. Default stays `gitops`. |
+| 🟡 | **push-only write-back mode** — `config.writebackMode: push-only` commits + pushes the work branch and stops (the user opens the PR). `gitops` and `direct` are shipped. |
 | 🟡 | **Validate GitHub App auth against a live GitHub App** — App auth shipped in 0.1.4 but is **alpha**: the JWT → installation-token exchange and the "App not installed" 401/403 path are mock-tested only. Exercise against a real GitHub App install (token mint, MR open) before recommending it for production. |
 
 ### Workload coverage

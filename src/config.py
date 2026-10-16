@@ -145,6 +145,19 @@ class ResourceConfig:
     # case without holding back workloads that have genuinely been running
     # for a couple of days. 0 disables the gate.
     min_sample_coverage: float = 0.25
+    # When False, `limits.cpu` is never written into a ResourceOverride (and
+    # one an existing CR carries is dropped on the next sync). The webhook
+    # replaces each patched container's `limits` sub-tree with the CR's, so
+    # pods end up with no CPU limit at all — CPU is then bounded by requests
+    # (CFS shares) instead of a hard quota that throttles bursts.
+    emit_cpu_limits: bool = True
+    # Largest move one sync may make on any request/limit, in percent of the
+    # current baseline (live CR value; else the pod-template value; else no
+    # clamp). 0 disables. OOM-driven memory increases are exempt upward.
+    max_change_percent: float = 0.0
+    # Minimum hours between two non-OOM changes of one workload's CR,
+    # measured from the CR's `last-changed` annotation. 0 disables.
+    cooldown_hours: float = 0.0
 
     @property
     def effective_cpu_request_margin(self) -> float:
@@ -214,6 +227,9 @@ class ResourceConfig:
             max_restarts_in_window=_int_bound(
                 d.get("maxRestartsInWindow", 3), default=3, field="maxRestartsInWindow"),
             min_sample_coverage=float(d.get("minSampleCoverage", "0.25")),
+            emit_cpu_limits=_bool(d.get("emitCpuLimits", True), default=True),
+            max_change_percent=float(d.get("maxChangePercent", 0) or 0),
+            cooldown_hours=float(d.get("cooldownHours", 0) or 0),
         )
 
     @classmethod
@@ -249,6 +265,9 @@ class ResourceConfig:
             health_gate_enabled=os.environ.get("HEALTH_GATE_ENABLED", "true").lower() in ("1", "true", "yes"),
             max_restarts_in_window=int(os.environ.get("MAX_RESTARTS_IN_WINDOW", "3")),
             min_sample_coverage=float(os.environ.get("MIN_SAMPLE_COVERAGE", "0.25")),
+            emit_cpu_limits=os.environ.get("EMIT_CPU_LIMITS", "true").lower() in ("1", "true", "yes"),
+            max_change_percent=float(os.environ.get("MAX_CHANGE_PERCENT", "0") or 0),
+            cooldown_hours=float(os.environ.get("COOLDOWN_HOURS", "0") or 0),
         )
 
 
@@ -271,6 +290,9 @@ class MrConfig:
     labels: list[str] = field(default_factory=list)
     squash: bool = False
     remove_source_branch: bool = True
+    # Source branch the tool force-pushes and opens the MR/PR from. Give each
+    # cluster its own when several share one gitops repo.
+    work_branch: str = "resource-updater/sync"
 
 
 @dataclass
@@ -330,6 +352,19 @@ class Config:
     git_app_id: str = ""
     git_installation_id: str = ""
     git_app_private_key: str = ""
+    # Where rendered ResourceOverrides go. "gitops" (default) commits them to
+    # crWriteback.repoUrl for a GitOps engine to apply; "direct" server-side
+    # applies them to the cluster API and records the audit trail on the CR
+    # (annotations + Kubernetes Events) instead of in git history.
+    writeback_mode: str = "gitops"
+    # Direct mode only: take over CRs whose `spec` another field manager owns
+    # (e.g. still applied by Argo CD). Off by default — such CRs are skipped
+    # with an error; turn on for one deliberate migration sync.
+    direct_adopt_foreign_crs: bool = False
+
+    @property
+    def is_direct(self) -> bool:
+        return self.writeback_mode == "direct"
 
     def validate(self) -> None:
         """Fail fast at runtime when configuration is missing or inconsistent.
@@ -356,11 +391,20 @@ class Config:
         import sys
 
         errors: list[str] = []
+        gitops = not self.is_direct
+
+        if self.writeback_mode not in ("gitops", "direct"):
+            errors.append(
+                f"config.writebackMode = {self.writeback_mode!r} is not a valid mode. "
+                f"Allowed values: 'gitops' (commit CRs to git), 'direct' (apply CRs "
+                f"to the cluster API)."
+            )
 
         # ── (1) Required keys ─────────────────────────────────────────────
-        if not self.cr_writeback.repo_url:
+        # Git settings only matter in gitops mode; direct mode never clones.
+        if gitops and not self.cr_writeback.repo_url:
             errors.append("config.crWriteback.repoUrl is empty (required)")
-        if not self.cr_writeback.path:
+        if gitops and not self.cr_writeback.path:
             errors.append("config.crWriteback.path is empty (required)")
         # Leading-slash path is a real footgun:
         # `os.path.join(repo_dir, path)` discards `repo_dir` when `path`
@@ -426,6 +470,18 @@ class Config:
                     f"common cause: typo (e.g. 95 instead of 0.95 for a percentile)"
                 )
 
+        if rc.max_change_percent < 0:
+            errors.append(
+                f"config.maxChangePercent = {rc.max_change_percent} is negative — "
+                f"use 0 to disable the per-sync change cap"
+            )
+
+        if rc.cooldown_hours < 0:
+            errors.append(
+                f"config.cooldownHours = {rc.cooldown_hours} is negative — "
+                f"use 0 to disable the cooldown"
+            )
+
         # Per-type margins (optional fields; None = inherit marginFraction).
         for attr, label in [
             ("cpu_request_margin",  "config.cpuRequestMargin"),
@@ -480,7 +536,7 @@ class Config:
         _has_app_auth = bool(
             self.git_app_id and self.git_installation_id and self.git_app_private_key
         )
-        if self.create_mr and not _effective_token and not _has_app_auth:
+        if gitops and self.create_mr and not _effective_token and not _has_app_auth:
             errors.append(
                 "config.createMr is true but no git credentials are configured — every "
                 "MR the tool tries to open will crash with 401. Set git.token "
@@ -584,6 +640,27 @@ class Config:
                 f"which would let a hand-edited ConfigMap inject git options."
             )
 
+        wb = self.mr.work_branch
+        if gitops and (
+            not wb or not branch_re.match(wb) or wb.startswith("-")
+            or wb.startswith("/") or ".." in wb
+        ):
+            errors.append(
+                f"config.mr.workBranch = {wb!r} is not a safe git ref (same rules as "
+                f"config.crWriteback.branch)."
+            )
+        elif gitops and (not wb.startswith("resource-updater/") or wb == "resource-updater/"):
+            errors.append(
+                f"config.mr.workBranch = {wb!r} must start with 'resource-updater/' (e.g. "
+                f"'resource-updater/<cluster>') — the tool force-pushes this branch, so it "
+                f"must never be a branch a person works on."
+            )
+        elif gitops and wb == (b or "main"):
+            errors.append(
+                f"config.mr.workBranch = {wb!r} equals config.crWriteback.branch — the "
+                f"tool force-pushes its work branch, which would overwrite the target branch."
+            )
+
         # gitlab_username: empty is the documented default (oauth2 fallback
         # in _auth_url). Non-empty must match GitLab's
         # username grammar — starts alphanumeric, then alphanumeric / '.'
@@ -603,7 +680,9 @@ class Config:
         # to the system identity ("user@host"), confusing commit attribution
         # and misattributing MR descriptions.
         name = (self.git_author_name or "").strip()
-        if not name:
+        if not gitops:
+            pass  # no commits in direct mode — author identity is unused
+        elif not name:
             errors.append(
                 "config.gitAuthorName is empty or whitespace-only — git would "
                 "fall back to system identity ('user@host') and commits would "
@@ -622,7 +701,9 @@ class Config:
         # '@', empty local-part or domain. Not trying to validate full
         # RFC 5322; the goal is "git happy AND GitLab happy".
         email = (self.git_author_email or "").strip()
-        if not email:
+        if not gitops:
+            pass
+        elif not email:
             errors.append(
                 "config.gitAuthorEmail is empty — git accepts it but GitLab "
                 "push hooks may reject the commit as having no committer. "
@@ -707,6 +788,7 @@ class Config:
                 labels=_parse_csv(mr_raw.get("labels", "")),
                 squash=_bool(mr_raw.get("squash", False)),
                 remove_source_branch=_bool(mr_raw.get("removeSourceBranch", True), default=True),
+                work_branch=str(mr_raw.get("workBranch", "") or "").strip() or "resource-updater/sync",
             ),
             grow_only=_bool(cfg.get("growOnly", False)),
             shrink_only=_bool(cfg.get("shrinkOnly", False)),
@@ -723,6 +805,8 @@ class Config:
             git_app_id=os.environ.get("GITHUB_APP_ID", "").strip(),
             git_installation_id=os.environ.get("GITHUB_APP_INSTALLATION_ID", "").strip(),
             git_app_private_key=os.environ.get("GITHUB_APP_PRIVATE_KEY", ""),
+            writeback_mode=str(cfg.get("writebackMode", "gitops") or "gitops").strip().lower(),
+            direct_adopt_foreign_crs=_bool((cfg.get("direct") or {}).get("adoptForeignCRs", False)),
         )
 
     @classmethod
@@ -774,6 +858,7 @@ class Config:
                 labels=_parse_csv(os.environ.get("MR_LABELS", "")),
                 squash=os.environ.get("MR_SQUASH", "false").lower() in ("1", "true", "yes"),
                 remove_source_branch=os.environ.get("MR_REMOVE_SOURCE_BRANCH", "true").lower() in ("1", "true", "yes"),
+                work_branch=os.environ.get("MR_WORK_BRANCH", "").strip() or "resource-updater/sync",
             ),
             grow_only=os.environ.get("GROW_ONLY", "false").lower() in ("1", "true", "yes"),
             shrink_only=os.environ.get("SHRINK_ONLY", "false").lower() in ("1", "true", "yes"),
@@ -790,6 +875,8 @@ class Config:
             git_app_id=os.environ.get("GITHUB_APP_ID", "").strip(),
             git_installation_id=os.environ.get("GITHUB_APP_INSTALLATION_ID", "").strip(),
             git_app_private_key=os.environ.get("GITHUB_APP_PRIVATE_KEY", ""),
+            writeback_mode=(os.environ.get("WRITEBACK_MODE", "gitops") or "gitops").strip().lower(),
+            direct_adopt_foreign_crs=os.environ.get("DIRECT_ADOPT_FOREIGN_CRS", "false").lower() in ("1", "true", "yes"),
         )
 
     @classmethod

@@ -195,6 +195,12 @@ _KEY_SPEC: dict[str, tuple[str, str, Any]] = {
     # onto ResourceConfig via `apply`.
     "maxRestartsInWindow":   ("resource", "max_restarts_in_window",  _parse_int),
     "minSampleCoverage":     ("resource", "min_sample_coverage",     _parse_float),
+    # CPU-limit emission. False drops `limits.cpu` from the rendered CR.
+    "emitCpuLimits":         ("resource", "emit_cpu_limits",         _parse_bool),
+    # Per-sync change cap (percent of the current baseline; 0 = off).
+    "maxChangePercent":      ("resource", "max_change_percent",      _parse_float),
+    # Hours between non-OOM changes of one workload's CR (0 = off).
+    "cooldownHours":         ("resource", "cooldown_hours",          _parse_float),
 }
 
 # Public set of key names callers can introspect (e.g. for a `--list-keys`

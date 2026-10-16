@@ -52,14 +52,24 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
-  # Reads existing ResourceOverrides at sync time to pick up the
-  # `oom-floor.<container>` annotation each carries (slow-path
-  # respects the floor as a memory minimum on subsequent
-  # recommendations). Read-only; CR writes go through git, never
-  # the apiserver. Verb dropped automatically when OOM-aware is off.
+  {{- end }}
+  # Reads existing ResourceOverrides at sync time. The live CR is the
+  # baseline for growOnly / shrinkOnly, the health-gate hold, OOM dedupe
+  # and floors, so the read is unconditional — not tied to OOM detection.
   - apiGroups: ["kube-resource-updater.io"]
     resources: ["resourceoverrides"]
     verbs: ["get", "list"]
+  {{- if eq (.Values.config.writebackMode | default "gitops") "direct" }}
+  # Direct write-back (`config.writebackMode: direct`): server-side apply of
+  # each CR, cleanup of tool-owned CRs no longer wanted, and one Event per
+  # change as the audit trail. Absent in gitops mode, where CR writes go
+  # through git and the GitOps engine.
+  - apiGroups: ["kube-resource-updater.io"]
+    resources: ["resourceoverrides"]
+    verbs: ["create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
   {{- end }}
   {{- /*
   Discovery-mode reads (endpoints in `default`, services + Prometheus CR

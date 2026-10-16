@@ -315,6 +315,9 @@ def run(
     status_flush_interval_seconds: int = 30,
     auto_rollout_enabled: bool = False,
     auto_rollout_debounce_seconds: int = 30,
+    auto_rollout_max_concurrent: int = 1,
+    auto_rollout_min_interval_seconds: int = 0,
+    auto_rollout_timeout_seconds: int = 600,
 ) -> None:
     """Start the webhook server. Blocks until SIGTERM/SIGINT.
 
@@ -344,6 +347,7 @@ def run(
     # kubelet rolls them.
     rollout_trigger: RolloutTrigger | None = None
     cr_event_callback = None
+    cr_seed_callback = None
     if auto_rollout_enabled:
         # Helm-default in the hierarchy is FALSE intentionally: turning the
         # feature on cluster-wide enables the *machinery* (the trigger
@@ -357,15 +361,22 @@ def run(
             ns_cache=ns_cache,
             helm_default_enabled=False,
             debounce_seconds=auto_rollout_debounce_seconds,
+            max_concurrent=auto_rollout_max_concurrent,
+            min_interval_seconds=auto_rollout_min_interval_seconds,
+            rollout_timeout_seconds=auto_rollout_timeout_seconds,
         )
         rollout_trigger.start()
         cr_event_callback = rollout_trigger.handle_event
-        _log.info("[rollout] auto-rollout enabled (debounce %ds, opt-in per workload/namespace via annotation)",
-                  auto_rollout_debounce_seconds)
+        cr_seed_callback = rollout_trigger.seed
+        _log.info("[rollout] auto-rollout enabled (debounce %ds, maxConcurrent %d, "
+                  "minInterval %ds, opt-in per workload/namespace via annotation)",
+                  auto_rollout_debounce_seconds, auto_rollout_max_concurrent,
+                  auto_rollout_min_interval_seconds)
     else:
         _log.info("[rollout] auto-rollout disabled (webhook.autoRollout.enabled=false)")
 
-    cr_cache = ResourceOverrideCache(custom_objects_api, event_callback=cr_event_callback)
+    cr_cache = ResourceOverrideCache(custom_objects_api, event_callback=cr_event_callback,
+                                     seed_callback=cr_seed_callback)
     cr_cache.start()
 
     status_updater: StatusUpdater | None = None

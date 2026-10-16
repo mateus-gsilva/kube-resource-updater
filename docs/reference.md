@@ -17,18 +17,18 @@ enabling GitOps-driven rightsizing without Kubernetes VPA.
 7. [Prometheus URL](#prometheus-url)
 8. [Prometheus queries](#prometheus-queries)
 9. [Resource computation](#resource-computation)
-10. [Write-back targets](#write-back-targets)
+10. [Write-back target](#write-back-target)
 11. [Git operations and MR creation](#git-operations-and-mr-creation)
 12. [Annotations reference](#annotations-reference)
 13. [Configuration reference](#configuration-reference)
 14. [OOM-aware bumps](#oom-aware-bumps)
 15. [Sample-quality gates](#sample-quality-gates)
-15. [Credential resolution](#credential-resolution)
-15. [Effective config logging](#effective-config-logging)
-16. [Commands](#commands)
-17. [Kubernetes RBAC](#kubernetes-rbac)
-18. [Compatibility](#compatibility)
-19. [Helm chart reference](#helm-chart-reference)
+16. [Credential resolution](#credential-resolution)
+17. [Effective config logging](#effective-config-logging)
+18. [Commands](#commands)
+19. [Kubernetes RBAC](#kubernetes-rbac)
+20. [Compatibility](#compatibility)
+21. [Helm chart reference](#helm-chart-reference)
 
 ---
 
@@ -87,8 +87,9 @@ closing the automation gap.
 - **Pipeline-compatible** — since changes land as a Merge Request, CI pipelines run
   against the proposed values before they reach the cluster (lint, policy checks,
   cost estimation, Slack notifications, etc.).
-- **Multi-cluster** — one CronJob instance manages resources across all ArgoCD-registered
-  clusters simultaneously.
+- **One install per cluster** — each cluster runs its own sync CronJob and webhook
+  against its own Prometheus; several clusters can share one gitops repo (give each its
+  own `crWriteback.path` and `config.mr.workBranch`).
 
 ---
 
@@ -217,6 +218,8 @@ After merge, ArgoCD/Flux applies the CR to the cluster. Two things happen next:
 2. **Auto-rollout (if enabled)** — when the CR changes and the workload has `kube-resource-updater.autoRollout: "true"` (or it's set on the namespace), the webhook stamps `kubectl.kubernetes.io/restartedAt: <now>` on the workload's PodTemplate. The kubelet sees the template hash change and rolls the pods with the new resources within seconds.
 
 For workloads without autoRollout, the new resources take effect on the next natural rollout (chart upgrade, image change, manual `kubectl rollout restart`).
+
+Restarts fire only when a CR's resources differ from the last state the webhook knew — watch replays and webhook reconnects (whose initial list seeds that state) never restart anything by themselves. They are also rate-limited: `webhook.autoRollout.maxConcurrent` (default `1`; `0` = unlimited) bounds workload rollouts in progress at once — a restart counts until its controller reports the rollout complete, `webhook.autoRollout.rolloutTimeoutSeconds` (default `600`) pass, or three status reads in a row fail — and `webhook.autoRollout.minIntervalSeconds` (default `0`) spaces consecutive restarts. Due restarts beyond that queue in order, so a sync that changes 50 CRs rolls the workloads one after another. Debounce (`debounceSeconds`) and cancellation on CR deletion are unchanged.
 
 ---
 
@@ -774,13 +777,34 @@ Container resources land **flat** under `spec.containers[i].{requests,limits}` �
 
 ### Orphan cleanup
 
-When a namespace stops opting in (`kube-resource-updater.enabled: "true"` removed), the next sync detects the orphan file under `crWriteback.path` and `git rm`s it as part of the same commit. The pruning only touches files matching `<namespace>.resource-override.yaml` — operator-added YAMLs in the same directory survive.
+When a namespace stops opting in (`kube-resource-updater.enabled: "true"` removed), the next sync detects the orphan file under `crWriteback.path` and `git rm`s it as part of the same commit. A file is pruned only when it is **tool-owned** — one of its documents carries `app.kubernetes.io/managed-by: kube-resource-updater` — and it is not a file this sync writes. That covers `<namespace>.resource-override.yaml` files at the path root and `*.yaml` files one directory below it (older per-namespace layouts); operator-added YAMLs without the label survive wherever they are. Per-workload `dryRun` workloads keep their committed doc and file. Nothing is pruned on a sync that produced no CRs at all.
+
+In `writebackMode: direct` the same notion applies to live objects: CRs labelled `managed-by: kube-resource-updater` that this sync does not render are deleted; CRs without the label are never listed.
 
 ### Push direct vs Merge Request
 
 `config.createMr` (default `true`) selects between:
-- **`createMr: true`** — push to branch `resource-updater/sync`, open or update one MR per repo via the GitLab REST API. MR metadata (`assignees` / `reviewers` / `labels` / `squash`) comes from `config.mr.*`.
-- **`createMr: false`** — push direct to `crWriteback.branch`. Useful when the operator wants OOM-aware bumps to apply without manual review gates (the ROADMAP "Split MR vs direct push by urgency" item proposes per-diff routing as a less-invasive default).
+- **`createMr: true`** — push to the work branch (`config.mr.workBranch`, default `resource-updater/sync`), open or update one MR/PR per repo. MR metadata (`assignees` / `reviewers` / `labels` / `squash`) comes from `config.mr.*`. Clusters sharing one repo need distinct work branches.
+- **`createMr: false`** — push direct to `crWriteback.branch`. Useful when the operator wants OOM-aware bumps to apply without manual review gates. `createMr` also resolves per namespace / workload, so one sync can push some workloads direct and route the rest through an MR.
+
+A direct push rejected because the branch moved on since the clone (another writer) is rebased onto `origin/<branch>` and retried **once**. A second rejection, a rebase conflict, or any other rejection (protected branch, missing permission) ends the sync with one redacted `[push]` error and exit code 1 — no traceback, no retry loop; the next scheduled sync re-renders from the new tip.
+
+### Write-back modes
+
+`config.writebackMode` (default `gitops`) chooses the write path:
+
+- **`gitops`** — everything above: CRs are committed to git and a GitOps engine applies them.
+- **`direct`** — no git. Each rendered CR is server-side applied to the API (`PATCH` with `application/apply-patch+yaml`, field manager `kube-resource-updater`, `force=true`). The apply body holds only tool-owned fields — `spec`, the `managed-by` label, the OOM and audit annotations — so operator annotations and labels stay with their own field manager and `force` takes nothing foreign. A container field that another manager still co-owns after the apply (typically one written by Argo CD before the switch) is cleared by replacing `spec.containers` wholesale. CRs whose spec and tool annotations already match are not written.
+
+  Audit trail: every change stamps `kube-resource-updater.io/last-changed` (RFC3339) and `kube-resource-updater.io/previous-resources` (compact JSON `{container: {requests, limits}}` of the prior values) on the CR, and records a `ResourcesUpdated` Event (`kubectl get events --field-selector involvedObject.kind=ResourceOverride`) whose message lists `old→new` per field. The same two annotations are rendered into gitops-mode CRs too (refreshed only when the resources change, so no-op syncs stay byte-identical).
+
+  Foreign ownership: if any field manager other than `kube-resource-updater` owns something under `spec` (the CR is still in an Argo CD Application, or was hand-applied), the CR is skipped — no apply, no orphan delete — with an `[direct] … spec is owned by …` error. Set `config.direct.adoptForeignCRs: true` for one deliberate migration sync: the forced apply (plus the `spec.containers` replace) moves ownership to the tool, after which the flag can go back to `false`.
+
+  ArgoCD tracking metadata is removed from live CRs in direct mode: the `argocd.argoproj.io/tracking-id` annotation, plus `app.kubernetes.io/instance` **only** when its `managedFields` owner is an `argocd*` manager (Argo CD label tracking) — the same label set by Helm, kustomize or a person is left alone, as are operator-set Argo CD options such as `sync-options` / `compare-options`. In gitops mode only a committed `argocd.argoproj.io/tracking-id` is dropped; operator-set Argo CD options in git are kept. The CR path must not stay under an Argo CD Application in direct mode.
+
+  No `crWriteback`, git token or author identity is required or validated. RBAC: the chart adds `create`/`patch`/`delete` on `resourceoverrides` and `create`/`patch` on `events` to the sync ClusterRole only in this mode. `dryRun` logs every would-be apply and delete without writing.
+
+A third mode, `push-only` (commit + push a branch, no MR), is planned — see the ROADMAP.
 
 ---
 
@@ -804,14 +828,14 @@ chore(resources): update resource requests/limits
 ### Push vs MR
 
 When `CREATE_MR=true` (default):
-- Changes are pushed to a new branch `resource-updater/sync`
+- Changes are pushed to the work branch (`config.mr.workBranch`, default `resource-updater/sync`)
 - A GitLab Merge Request is opened with a full diff table showing before/after values
   and percentage deltas for every container
 
 When `CREATE_MR=false`:
 - Changes are pushed directly to the target branch
 
-**MR deduplication:** if an MR from `resource-updater/sync` to the target branch
+**MR deduplication:** if an MR from the work branch (`config.mr.workBranch`) to the target branch
 already exists, the existing MR is reused (HTTP 409 → list and return the existing URL).
 
 **Repository grouping:** applications sharing the same `repoURL + targetRevision` are
@@ -821,7 +845,7 @@ regardless of how many Applications reference it.
 ### Dry run
 
 When `DRY_RUN=true`, all Prometheus queries, resource computation, and YAML patching
-run normally, but no git operations are performed. Computed values are logged.
+run normally, but no git (or, in direct mode, API) writes are performed. Computed values are logged.
 
 ---
 
@@ -865,6 +889,9 @@ Every key in `config:` of [`values.yaml`](../charts/kube-resource-updater/values
 | `kube-resource-updater.oomBumpFactor` | float | Multiplier applied to the limit at OOM time, default `"1.5"` |
 | `kube-resource-updater.maxRestartsInWindow` | int | Restarts tolerated inside the widest request window before the recommendation is held. Default `3`; `0` disables the gate |
 | `kube-resource-updater.minSampleCoverage` | float | Fraction of the window's evaluation points that must carry data before a percentile is trusted. Default `"0.25"`; `0` disables the gate |
+| `kube-resource-updater.maxChangePercent` | float | Per-sync change cap in percent of the current value; `0` disables. See [Guardrails](#guardrails) |
+| `kube-resource-updater.cooldownHours` | float | Minimum hours between non-OOM changes of this workload; `0` disables |
+| `kube-resource-updater.emitCpuLimits` | bool | `"false"` = never write `limits.cpu` (requests-only CPU) |
 
 Unknown keys log a typo warning at sync time listing the known set. A malformed value (e.g. `oomBumpFactor: "yes"`) falls through to the next layer of the hierarchy rather than crashing.
 
@@ -885,13 +912,9 @@ config:            # global defaults
   createMr: true
   cpuPercentile: "0.90"
   ...
-
-clusters:          # per-cluster overrides (only prometheusUrl for now)
-  staging-cluster:
-    prometheusUrl: "https://prometheus-stg.example.com"
-  prod-cluster:
-    prometheusUrl: "https://prometheus-prd.example.com"
 ```
+
+One install serves one cluster; per-namespace / per-workload tuning goes through annotations.
 
 > **Local development fallback:** when no config file is found, the tool falls back to
 > environment variables with a deprecation warning. Env var names are listed below each
@@ -906,7 +929,10 @@ clusters:          # per-cluster overrides (only prometheusUrl for now)
 | `gitlabUsername` | `GITLAB_USERNAME` | `""` | Username for token auth (user-generated tokens) |
 | `gitAuthorName` | `GIT_AUTHOR_NAME` | `kube-resource-updater` | Git commit author name |
 | `gitAuthorEmail` | `GIT_AUTHOR_EMAIL` | `kube-resource-updater@cluster.local` | Git commit author email |
+| `writebackMode` | `WRITEBACK_MODE` | `gitops` | `gitops` commits CRs to git; `direct` server-side applies them to the cluster API (see [Write-back modes](#write-back-modes)) |
+| `direct.adoptForeignCRs` | `DIRECT_ADOPT_FOREIGN_CRS` | `false` | Direct mode: take over CRs whose `spec` another field manager owns; default skips them with an error |
 | `createMr` | `CREATE_MR` | `true` | `true` opens a GitLab MR; `false` pushes directly |
+| `mr.workBranch` | `MR_WORK_BRANCH` | `resource-updater/sync` | Source branch of the MR/PR. Must start with `resource-updater/` (the tool force-pushes it); one per cluster when several share a repo, e.g. `resource-updater/<cluster>` |
 | `dryRun` | `DRY_RUN` | `false` | `true` skips all git operations |
 
 ### Prometheus
@@ -983,6 +1009,15 @@ Held workloads keep the values already committed to their `ResourceOverride`; th
 | `healthGateEnabled` | `HEALTH_GATE_ENABLED` | `true` | Hold the recommendation when the sample window is untrustworthy. Per-workload override via annotation. |
 | `maxRestartsInWindow` | `MAX_RESTARTS_IN_WINDOW` | `3` | Restarts tolerated inside the widest request window before holding. `0` disables the gate. |
 | `minSampleCoverage` | `MIN_SAMPLE_COVERAGE` | `0.25` | Fraction of the window's evaluation points that must carry data. `0` disables the gate. |
+
+### Guardrails
+
+| Config key | Env var | Default | Description |
+|---|---|---|---|
+| `maxChangePercent` | `MAX_CHANGE_PERCENT` | `0` | Each request/limit moves at most N% of its current value per sync. Baseline: the live CR; else the workload's pod-template value; else no clamp. OOM-driven memory growth (fresh bump or sticky floor) is exempt upward but still respects `maxMemoryLimitMi`; the max bounds win over the cap's lower edge. Per-workload override. |
+| `cooldownHours` | `COOLDOWN_HOURS` | `0` | A workload whose CR `last-changed` is younger than N hours keeps its current values (Prometheus is not queried for it); a fresh OOM still bumps memory on top. In gitops mode `last-changed` is the render time, not the merge time. Per-workload override. |
+| `emitCpuLimits` | `EMIT_CPU_LIMITS` | `true` | `false` never writes `limits.cpu` and drops one an existing CR carries on the next sync. The webhook replaces each patched container's `limits` with the CR's, so the pod ends up with no CPU limit (one from the workload spec is removed too) — keep `true` where a ResourceQuota requires `limits.cpu`. Per-workload override. |
+| `cronjob.suspend` (chart) | — | `false` | Kill switch: suspends the sync CronJob; the webhook keeps applying existing CRs. |
 
 ### Other
 
@@ -1106,11 +1141,11 @@ OOM bumps still apply to a held container. An OOM bump is driven by the trap lim
 
 Every hold is logged at WARNING as `[health-hold]` with the reason and the preserved values, and listed in a **Held back** table in the MR description so a reviewer can tell "nothing changed because usage is stable" apart from "nothing changed because the tool refused to trust the data".
 
-### Fail-open behaviour
+### Missing signals
 
-`kube_pod_container_status_restarts_total` comes from kube-state-metrics. On a cluster without it the query returns no data and the crash-loop gate is **inert**, with one WARNING per sync saying so. Holding every workload in the cluster because a metric is missing would be a worse regression than the bug the gate closes.
+`kube_pod_container_status_restarts_total` comes from kube-state-metrics. When it has no data for a container (no kube-state-metrics, or the query failed) the crash-loop gate **fails closed**: it cannot tell a crash loop from a healthy pod, so the container is held with reason `no-restart-signal` — committed values kept, or the container omitted when it has no CR yet — and one summary WARNING per sync names the metric. Clusters that do not run kube-state-metrics opt out explicitly with `maxRestartsInWindow: 0` (or `healthGateEnabled: false`).
 
-The coverage gate fails open the same way: a container with no series at all also produces no request/limit values, and the existing "no Prometheus data" path already skips it.
+The coverage gate fails open: a container with no series at all also produces no request/limit values, and the existing "no Prometheus data" path already skips it.
 
 ### Operator controls
 
@@ -1210,14 +1245,23 @@ Always granted:
 | Resource | Verbs | Reason |
 |---|---|---|
 | `namespaces` | `get`, `list` | Discover opted-in namespaces |
-| `deployments.apps`, `statefulsets.apps` | `get`, `list` | Workload discovery in opted-in namespaces |
+| `deployments.apps`, `statefulsets.apps`, `daemonsets.apps`, `cronjobs.batch` | `get`, `list` | Workload discovery in opted-in namespaces |
+| `resourceoverrides.kube-resource-updater.io` | `get`, `list` | Live CRs: baseline for growOnly / shrinkOnly, maxChangePercent, cooldown, health-gate holds, OOM dedupe and floors |
 
 Gated on `config.oomDetectionEnabled` (default true):
 
 | Resource | Verbs | Reason |
 |---|---|---|
 | `pods` | `get`, `list` | Scan `containerStatuses[*].lastState.terminated.reason` at sync time |
-| `resourceoverrides.kube-resource-updater.io` | `get`, `list` | Read live `oom-floor.<container>` / `oom-last-event.<container>` annotations as source of truth |
+
+Gated on `config.writebackMode: direct`:
+
+| Resource | Verbs | Reason |
+|---|---|---|
+| `resourceoverrides.kube-resource-updater.io` | `create`, `patch`, `delete` | Server-side apply of each CR; deletion of tool-owned CRs no longer wanted |
+| `events` | `create`, `patch` | `ResourcesUpdated` audit Event per change |
+
+Blast radius: the direct-mode grant is cluster-wide on purpose — namespaces opt in by annotation at any time, so a fixed namespace list would go stale. The sync therefore holds create/patch/delete on every `ResourceOverride` in the cluster, which is the ability to change pod resources anywhere the webhook admits pods. The code narrows what it does with it: the only delete call is the orphan prune, which lists with a `managed-by` label selector and re-checks the label on each listed object before deleting it; namespaces with a discovery, Prometheus or live-CR read failure that sync are left untouched; CRs whose `spec` another field manager owns are never applied or deleted (unless `direct.adoptForeignCRs`).
 
 **No discovery-mode grants**: Prometheus auto-discovery was
 removed along with the three cluster-wide reads it required (`endpoints`,
@@ -1233,7 +1277,7 @@ it's empty.
 | `resourceoverrides.kube-resource-updater.io` | `get`, `list`, `watch` | Informer that feeds `/mutate-pod` and `/validate-resourceoverride` |
 | `resourceoverrides.kube-resource-updater.io/status` | `patch` | Stamp `lastAppliedAt` |
 | `mutatingwebhookconfigurations`, `validatingwebhookconfigurations` | `get`, `patch` | In-process cert reconciler patches `clientConfig.caBundle` on the chart's own MWC/VWC objects |
-| `deployments.apps`, `statefulsets.apps` | `get`, `list`, `watch` | Auto-rollout watcher (gated on `webhook.autoRollout.enabled`) |
+| `deployments.apps`, `statefulsets.apps`, `daemonsets.apps` | `get`, `list`, `watch` | Auto-rollout watcher; `get` also reads rollout status for `maxConcurrent` (gated on `webhook.autoRollout.enabled`) |
 | `deployments.apps`, `statefulsets.apps` | `patch` | Stamp `restartedAt` on the workload's PodTemplate when its CR changes (gated on `webhook.autoRollout.enabled`) |
 
 ---
@@ -1314,6 +1358,7 @@ rationale.
 
 | Parameter | Default | Description |
 |---|---|---|
+| `cronjob.suspend` | `false` | Kill switch — suspend the CronJob without uninstalling |
 | `cronjob.schedule` | `0 */6 * * *` | Cron expression |
 | `cronjob.timeZone` | `UTC` | Timezone for the schedule |
 | `cronjob.concurrencyPolicy` | `Forbid` | Prevent overlapping runs |

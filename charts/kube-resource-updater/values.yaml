@@ -52,10 +52,12 @@ image:
 
 ## @section CronJob parameters
 cronjob:
-  ## @param cronjob.enabled Deploy the sync CronJob and its RBAC. Set to false on clusters that
-  ## only need the admission webhook (the webhook is the per-cluster runtime; the CronJob runs
-  ## in a single "control" cluster that has access to ArgoCD Applications and the GitLab token).
+  ## @param cronjob.enabled Deploy the sync CronJob and its RBAC. Each cluster runs its own sync
+  ## (it reads that cluster's workloads, Prometheus and live CRs). Set to false only for a
+  ## webhook-only install, e.g. while CRs are still managed by hand.
   enabled: true
+  ## @param cronjob.suspend Kill switch — suspend the sync CronJob (no new runs; the webhook keeps applying existing CRs)
+  suspend: false
   ## @param cronjob.schedule Cron schedule expression
   schedule: "0 */6 * * *"
   ## @param cronjob.timeZone Timezone (requires k8s >= 1.27)
@@ -106,6 +108,27 @@ args:
 ##     kube-resource-updater.shrinkOnly: "true"
 ##
 config:
+  ## Write-back mode — where rendered ResourceOverrides go.
+  ##
+  ##   gitops (default)  commit CRs to `crWriteback.repoUrl`; a GitOps engine
+  ##                     (Argo CD, Flux) applies them. Review via MR/PR, audit
+  ##                     trail = git history. Needs crWriteback + git creds.
+  ##   direct            server-side apply CRs to the cluster API (field
+  ##                     manager `kube-resource-updater`) and delete the
+  ##                     tool-owned CRs no longer wanted. No git settings
+  ##                     needed; audit trail = `last-changed` /
+  ##                     `previous-resources` annotations + a Kubernetes Event
+  ##                     per change. The CRs must NOT be managed by an Argo CD
+  ##                     Application (or exclude the ResourceOverride kind),
+  ##                     or the two will fight. Grants the sync ClusterRole
+  ##                     create/patch/delete on resourceoverrides + events.
+  ##
+  ## @param config.writebackMode Write-back mode: "gitops" (commit to git) | "direct" (apply to the cluster API)
+  writebackMode: gitops
+  ## Direct-mode options (ignored in gitops mode).
+  direct:
+    ## @param config.direct.adoptForeignCRs Take over CRs whose spec another field manager owns (e.g. still applied by Argo CD). Default false — such CRs are skipped (no apply, no delete) with an error; enable for one deliberate migration sync.
+    adoptForeignCRs: false
   ## @param config.gitProvider Git provider override: "" (auto-detect from repoUrl) | "auto" | "gitlab" | "github"
   ## When empty, the tool infers the provider from the repoUrl host (github.com / github.* →
   ## GitHub; everything else → GitLab). Override here to force a specific provider or to wire
@@ -190,6 +213,31 @@ config:
   growOnly: false
   ## @param config.shrinkOnly Global shrink-only mode: only decrease resource values, never increase. Per-app annotation overrides.
   shrinkOnly: false
+  ## CPU limits. `false` never writes `limits.cpu` into a ResourceOverride and
+  ## drops one an existing CR carries on the next sync. The webhook replaces
+  ## each patched container's `limits` with the CR's, so the pod ends up with
+  ## no CPU limit (a CPU limit from the workload spec is removed too). Keep
+  ## `true` in namespaces whose ResourceQuota requires `limits.cpu`.
+  ## Per-workload override: `kube-resource-updater.emitCpuLimits: "false"`.
+  ## @param config.emitCpuLimits Write limits.cpu into the CR (false = requests-only CPU)
+  emitCpuLimits: true
+  ## Per-sync change cap. Each request/limit moves at most this percentage of
+  ## its current value per sync — the live ResourceOverride, or the
+  ## workload's pod-template value when no CR exists yet (no baseline → no
+  ## cap). OOM-driven memory increases are exempt on the way up but still
+  ## respect maxMemoryLimitMi. Per-workload override:
+  ## `kube-resource-updater.maxChangePercent: "25"`.
+  ## @param config.maxChangePercent Max % a value may move per sync vs its current value (0 = disabled)
+  maxChangePercent: "0"
+  ## Cooldown between changes. A workload whose ResourceOverride changed less
+  ## than this many hours ago keeps its current values; only OOM-driven
+  ## memory bumps still apply. Measured from the CR's
+  ## `kube-resource-updater.io/last-changed` annotation, which every change
+  ## stamps (with `previous-resources` holding the prior values). In gitops
+  ## mode the timestamp is the render time, not the merge time. Per-workload
+  ## override: `kube-resource-updater.cooldownHours: "24"`.
+  ## @param config.cooldownHours Minimum hours between non-OOM changes of one workload (0 = disabled)
+  cooldownHours: "0"
 
   ## OOM-aware. Detects `OOMKilled` events on opted-in
   ## workloads at sync time (slow-path only — 's webhook
@@ -264,9 +312,11 @@ config:
   ## `[health-hold]` and listed in the MR description.
   ##
   ## The crash-loop gate reads `kube_pod_container_status_restarts_total`,
-  ## so it needs kube-state-metrics. Without it the gate is inert and logs a
-  ## warning once per sync — it fails open rather than freezing every
-  ## workload in the cluster.
+  ## so it needs kube-state-metrics. Without it the gate fails CLOSED: it
+  ## cannot tell a crash loop from a healthy pod, so every container keeps
+  ## its committed values (held with reason `no-restart-signal`) and a
+  ## warning is logged. Set `maxRestartsInWindow: 0` to size without the
+  ## crash-loop check on clusters that do not run kube-state-metrics.
   ##
   ## Per-workload override via the standard hierarchy
   ## (workload > namespace > helm-default):
@@ -306,7 +356,8 @@ config:
   ## @param config.skipContainers Comma-separated container names to skip cluster-wide
   skipContainers: ""
 
-  ## CR write-back target — REQUIRED. The chart fails to install/upgrade when
+  ## CR write-back target — REQUIRED in gitops mode (ignored when
+  ## `writebackMode: direct`). The chart fails to install/upgrade when
   ## crWriteback.repoUrl or crWriteback.path is empty (Helm `required` template
   ## function in templates/configmap.yaml). The tool re-validates at startup
   ## as defence in depth in case the ConfigMap is hand-edited later.
@@ -315,11 +366,11 @@ config:
   ## — one file per Namespace, with multiple workloads of the same Namespace
   ## stored as separate YAML documents in that file.
   crWriteback:
-    ## @param config.crWriteback.repoUrl Git repo URL where ResourceOverride CRs are committed (REQUIRED)
+    ## @param config.crWriteback.repoUrl Git repo URL where ResourceOverride CRs are committed (REQUIRED in gitops mode)
     repoUrl: ""
     ## @param config.crWriteback.branch Branch within crWriteback.repoUrl (defaults to "main")
     branch: "main"
-    ## @param config.crWriteback.path In-repo directory where files land (REQUIRED)
+    ## @param config.crWriteback.path In-repo directory where files land (REQUIRED in gitops mode)
     path: ""
   ## Prometheus URL — REQUIRED (auto-discovery removed).
   ##
@@ -367,6 +418,8 @@ config:
     squash: false
     ## @param config.mr.removeSourceBranch Delete source branch after merge (kept true for the historical default)
     removeSourceBranch: true
+    ## @param config.mr.workBranch Source branch the tool force-pushes and opens the MR/PR from. Must start with `resource-updater/` (it is force-pushed); use one per cluster when several clusters share one gitops repo, e.g. `resource-updater/<cluster>`.
+    workBranch: "resource-updater/sync"
 
 ## @section Git credentials
 ##
@@ -706,6 +759,17 @@ webhook:
     enabled: false
     ## @param webhook.autoRollout.debounceSeconds How long to wait after the last CR change before patching the workload's PodTemplate.
     debounceSeconds: 30
+    ## Rate limit so one sync that changes many CRs does not restart every
+    ## workload at once. A restart counts as in progress until its controller
+    ## reports the rollout complete (or rolloutTimeoutSeconds pass); due restarts beyond
+    ## the limit queue in order. Watch replays and webhook reconnects never
+    ## trigger restarts on their own — only a real change of a CR's resources.
+    ## @param webhook.autoRollout.maxConcurrent Max workload rollouts in progress at once (0 = unlimited)
+    maxConcurrent: 1
+    ## @param webhook.autoRollout.minIntervalSeconds Minimum seconds between two restarts (0 = no spacing)
+    minIntervalSeconds: 0
+    ## @param webhook.autoRollout.rolloutTimeoutSeconds Seconds a restarted workload counts against maxConcurrent before its slot is released even if the rollout has not finished (a slot is also released after 3 consecutive status read errors)
+    rolloutTimeoutSeconds: 600
 
   ## Status writer — populates ResourceOverride.status.appliedToPodCount and
   ## .status.lastAppliedAt so `kubectl get ro -A` becomes a real adoption

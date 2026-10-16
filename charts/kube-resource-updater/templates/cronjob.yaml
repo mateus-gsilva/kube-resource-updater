@@ -15,6 +15,9 @@ spec:
   {{- with .Values.cronjob.timeZone }}
   timeZone: {{ . | quote }}
   {{- end }}
+  # Kill switch: `cronjob.suspend: true` stops new syncs without uninstalling;
+  # CRs already in place keep being applied by the webhook.
+  suspend: {{ .Values.cronjob.suspend | default false }}
   concurrencyPolicy: {{ .Values.cronjob.concurrencyPolicy }}
   successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit }}
   failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit }}

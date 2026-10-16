@@ -40,6 +40,7 @@ from src.prometheus import (
     query_cpu_sample_count,
     query_mem_sample_count,
     query_restart_count,
+    restart_signal_status,
 )
 
 _log = _log_module.get(__name__)
@@ -48,6 +49,7 @@ _log = _log_module.get(__name__)
 # MR description, so operators grep for them.
 HOLD_RESTARTS = "restarts"
 HOLD_INSUFFICIENT_DATA = "insufficient-data"
+HOLD_NO_RESTART_SIGNAL = "no-restart-signal"
 
 # Subquery steps of the two request queries in `src/prometheus.py`. The
 # coverage queries mirror them, so the expected-sample counts must use the
@@ -55,9 +57,9 @@ HOLD_INSUFFICIENT_DATA = "insufficient-data"
 _CPU_REQUEST_STEP = "1m"
 _MEM_REQUEST_STEP = "5m"
 
-# One warning per process when the restart metric is missing everywhere. The
+# One summary warning per process when the restart metric is missing. The
 # sync runs as a CronJob (one process per run), so this is one line per sync
-# rather than one per container.
+# on top of the per-container `[health-hold]` lines.
 _restart_metric_warned = False
 
 
@@ -120,13 +122,18 @@ def evaluate_restart_gate(
     restarts: int | None,
     max_restarts: int,
     window: str,
+    signal_status: str = "",
 ) -> HoldVerdict:
     """Hold when the workload's pods restarted too often inside the window.
 
-    `restarts is None` means the counter is absent (no kube-state-metrics).
-    That fails OPEN: holding every workload in the cluster because a metric
-    is missing would be a far worse regression than the bug this gate
-    closes, and the operator gets a warning telling them the gate is inert.
+    `restarts is None` means the counter is absent (no kube-state-metrics,
+    or the query failed). That fails CLOSED: without the signal the gate
+    cannot tell a crash-looping pod from a healthy one, and sizing from a
+    crash loop is exactly the failure this gate exists to stop. The caller
+    keeps the values already committed to the CR (or omits a container
+    that has none), so a missing metric freezes recommendations rather than
+    corrupting them. The operator opts out explicitly with
+    `maxRestartsInWindow: 0` or `healthGateEnabled: false`.
 
     `max_restarts <= 0` disables the gate.
     """
@@ -139,12 +146,26 @@ def evaluate_restart_gate(
             _restart_metric_warned = True
             _log.warning(
                 "[health] kube_pod_container_status_restarts_total returned no "
-                "data — the crash-loop gate is inert this sync and "
-                "recommendations may be computed from unhealthy pods. Install "
-                "kube-state-metrics, or set config.healthGateEnabled=false to "
-                "silence this."
+                "data — the crash-loop gate cannot verify pod health, so affected "
+                "containers keep their committed values this sync (see the "
+                "[health-hold] lines). Install kube-state-metrics, or set "
+                "config.maxRestartsInWindow=0 (or healthGateEnabled=false) to size "
+                "without the crash-loop check."
             )
-        return NOT_HELD
+        if signal_status == "query-error":
+            detail = (
+                f"the kube_pod_container_status_restarts_total query failed (after "
+                f"one retry) for {window} — crash-loop gate cannot verify pod health "
+                f"this sync; check Prometheus reachability"
+            )
+        else:
+            detail = (
+                f"kube_pod_container_status_restarts_total has no data for this "
+                f"container over {window} — crash-loop gate cannot verify pod health "
+                f"(install kube-state-metrics, or set maxRestartsInWindow=0 to size "
+                f"without it)"
+            )
+        return HoldVerdict(True, HOLD_NO_RESTART_SIGNAL, detail)
     if restarts <= max_restarts:
         return NOT_HELD
     return HoldVerdict(
@@ -204,10 +225,14 @@ def assess_container(
         return NOT_HELD
 
     restart_window = widest_window(rc.cpu_request_window, rc.mem_request_window)
+    restarts = query_restart_count(prometheus_url, namespace, container, target_name,
+                                   restart_window)
     verdict = evaluate_restart_gate(
-        query_restart_count(prometheus_url, namespace, container, target_name, restart_window),
+        restarts,
         rc.max_restarts_in_window,
         restart_window,
+        signal_status=restart_signal_status(prometheus_url, namespace, container,
+                                            target_name, restart_window),
     )
     if verdict.held:
         return verdict

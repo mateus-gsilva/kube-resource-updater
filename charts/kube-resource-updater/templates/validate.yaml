@@ -42,7 +42,11 @@ source is sufficient. When all four are empty with createMr=true, the sync would
 run, build the diff, push the branch, then crash on MR-open with a 401.
 */}}
 {{- $hasAppAuth := and .Values.git.appId .Values.git.installationId (or .Values.git.appPrivateKey .Values.git.appPrivateKeySecret) }}
-{{- if and .Values.cronjob.enabled (eq (toString (.Values.config.createMr | default false)) "true") (not .Values.git.token) (not .Values.git.existingSecret) (not .Values.gitlab.token) (not .Values.gitlab.existingSecret) (not $hasAppAuth) }}
+{{- $writebackMode := .Values.config.writebackMode | default "gitops" }}
+{{- if not (has $writebackMode (list "gitops" "direct")) }}
+{{- fail (printf "config.writebackMode = %q is not a valid mode. Allowed values: 'gitops' (commit CRs to git), 'direct' (apply CRs to the cluster API)." $writebackMode) }}
+{{- end }}
+{{- if and .Values.cronjob.enabled (eq $writebackMode "gitops") (eq (toString (.Values.config.createMr | default false)) "true") (not .Values.git.token) (not .Values.git.existingSecret) (not .Values.gitlab.token) (not .Values.gitlab.existingSecret) (not $hasAppAuth) }}
 {{- fail "config.createMr=true but no git credentials are set — the MR-open call will get 401 mid-sync. Set a token via git.token, git.existingSecret, gitlab.token, or gitlab.existingSecret; OR configure GitHub App auth (git.appId + git.installationId + git.appPrivateKeySecret); or set config.createMr=false to push direct." }}
 {{- end }}
 
